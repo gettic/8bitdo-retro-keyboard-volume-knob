@@ -4,7 +4,7 @@
 
 Steps: check the version against version.py, run PyInstaller (onedir, no console,
 no UPX, version resource) from build\\venv, stage dist\\8BitDo Volume Knob\\ (exe,
-_internal, extension, Install.cmd, Uninstall.cmd), run the exe's --self-test, zip it.
+_internal, extension, Install.cmd, Uninstall.cmd, LICENSE.txt), run the exe's --self-test, zip it.
 The last line printed is the zip path. Exit 0 = OK, 1 = failed, 3 = build venv missing.
 
 build\\venv is made only with --allow-download (the one download: PyInstaller from
@@ -25,6 +25,16 @@ VENV = os.path.join(BUILD, "venv")
 VENV_PY = os.path.join(VENV, "Scripts", "python.exe")
 STAGE_NAME = "8BitDo Volume Knob"
 CREATE_NO_WINDOW = 0x08000000
+
+# Not used by the program; each is only reached through a lazy or try/except import
+# in the standard library (see plans\v1.0.1-build\installer-report.md).
+# socket/_socket must stay: logging.handlers imports socket at module level.
+EXCLUDE = ["tkinter", "unittest", "pydoc",
+           "ssl", "_ssl", "_hashlib", "smtplib", "http",
+           "_bz2", "_lzma", "_decimal", "_wmi"]
+# Files that must not be in the build (guard against a PyInstaller update adding them back).
+FORBIDDEN = ["_ssl.pyd", "libssl-3.dll", "libcrypto-3.dll", "_hashlib.pyd",
+             "_bz2.pyd", "_lzma.pyd", "_decimal.pyd", "_wmi.pyd"]
 
 
 def fail(msg, code=1):
@@ -91,6 +101,9 @@ def version_file(text, nums):
 
 
 def pyinstaller(vfile):
+    excludes = []
+    for name in EXCLUDE:
+        excludes += ["--exclude-module", name]
     run([VENV_PY, "-I", "-m", "PyInstaller", os.path.join(CODE, "volume_knob.py"),
          "--name", "volume_knob", "--onedir", "--noconsole", "--noupx",
          "--clean", "--noconfirm", "--log-level", "WARN",
@@ -100,9 +113,7 @@ def pyinstaller(vfile):
          "--hidden-import", "knob.coreaudio",
          "--hidden-import", "setup_knob",
          "--hidden-import", "setup_knob.setup",
-         "--exclude-module", "tkinter",
-         "--exclude-module", "unittest",
-         "--exclude-module", "pydoc",
+         *excludes,
          "--version-file", vfile,
          "--specpath", BUILD,
          "--workpath", os.path.join(BUILD, "work"),
@@ -121,6 +132,10 @@ def stage():
             text = f.read().replace("\r\n", "\n")
         with open(os.path.join(out, name), "w", encoding="ascii", newline="\r\n") as f:
             f.write(text)
+    shutil.copyfile(os.path.join(CODE, "LICENSE"), os.path.join(out, "LICENSE.txt"))
+    found = [n for n in FORBIDDEN if os.path.exists(os.path.join(out, "_internal", n))]
+    if found:
+        fail("unused modules are back in the build: " + ", ".join(found))
     return out
 
 
@@ -153,8 +168,14 @@ def make_zip(folder, version):
         bad = z.testzip()
         if bad:
             fail("zip check failed at " + bad)
-        if STAGE_NAME + "/volume_knob.exe" not in z.namelist():
-            fail("zip has no volume_knob.exe")
+        names = z.namelist()
+        for need in ("volume_knob.exe", "LICENSE.txt", "Install.cmd", "Uninstall.cmd",
+                     "extension/manifest.json"):
+            if STAGE_NAME + "/" + need not in names:
+                fail("zip has no " + need)
+        bad = [n for n in names if n.rsplit("/", 1)[-1] in FORBIDDEN]
+        if bad:
+            fail("zip has unused modules: " + ", ".join(bad))
     return path
 
 
@@ -170,6 +191,8 @@ def main():
         fail("--version %s does not match version.py (%s)" % (args.version, text))
     os.makedirs(BUILD, exist_ok=True)
     os.makedirs(DIST, exist_ok=True)
+    if not os.path.isfile(os.path.join(CODE, "LICENSE")):
+        fail("code\\LICENSE is missing (GPL-3.0 text must ship in the zip)")
     ensure_venv(args.allow_download)
     pyinstaller(version_file(text, nums))
     folder = stage()
