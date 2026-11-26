@@ -116,8 +116,13 @@ class Bitmap:
             gdi32.DeleteObject(pen)
 
     def fill(self, x, y, w, h, color):
+        if w <= 0 or h <= 0:
+            return
+        x0, y0 = int(round(x)), int(round(y))
+        # at least 1 px: a thin line at a fractional position must not round away
+        x1, y1 = max(x0 + 1, int(round(x + w))), max(y0 + 1, int(round(y + h)))
         brush = gdi32.CreateSolidBrush(colorref(color))
-        r = wt.RECT(int(round(x)), int(round(y)), int(round(x + w)), int(round(y + h)))
+        r = wt.RECT(x0, y0, x1, y1)
         user32.FillRect(self.dc, ctypes.byref(r), brush)
         gdi32.DeleteObject(brush)
 
@@ -137,8 +142,10 @@ class Bitmap:
         arr = (wt.POINT * len(pts))(*[wt.POINT(int(round(px)), int(round(py))) for px, py in pts])
         self._with_brush(color, lambda: gdi32.Polygon(self.dc, arr, len(pts)))
 
-    def text(self, s, x, y, w, h, size, color, face="Segoe UI", weight=400, align=DT_LEFT):
-        font = gdi32.CreateFontW(-int(round(size)), 0, 0, 0, weight, 0, 0, 0, 1, 0, 0,
+    def text(self, s, x, y, w, h, size, color, face="Segoe UI", weight=400, align=DT_LEFT,
+             width=0):
+        """width: average character width in px (0 = normal, smaller = narrower)."""
+        font = gdi32.CreateFontW(-int(round(size)), int(width), 0, 0, weight, 0, 0, 0, 1, 0, 0,
                                  ANTIALIASED_QUALITY, 0, face)
         old = gdi32.SelectObject(self.dc, font)
         gdi32.SetTextColor(self.dc, colorref(color))

@@ -292,6 +292,242 @@
   // somewhere else, start again from what the page shows.
   let exact = null;
 
+  // ---- volume box ---------------------------------------------------------------
+  // A small box in YouTube's style ("76%", "Muted", "135%" + boost bar) shown on
+  // each knob click, inside the player so it also shows in fullscreen. Built with
+  // createElement/textContent only (YouTube enforces Trusted Types). Not shown for
+  // the program's failsafe or for the page's own controls. If no place to attach
+  // is found, there is simply no box.
+  const BOX_CLASS = "vk8bitdo-box";
+  const BOX_MS = 800;
+  const BOX_CSS = [
+    "." + BOX_CLASS + "{position:absolute;left:50%;top:10%;transform:translateX(-50%);z-index:70;",
+    "pointer-events:none;min-width:64px;padding:10px 18px;box-sizing:content-box;",
+    "background:rgba(28,28,28,.82);color:#fff;border-radius:10px;text-align:center;",
+    "font:500 22px/1.15 \"YouTube Sans\",Roboto,Arial,sans-serif;letter-spacing:.3px;",
+    "box-shadow:0 2px 10px rgba(0,0,0,.35);opacity:0;transition:opacity .3s ease-out}",
+    "." + BOX_CLASS + ".vk8bitdo-on{opacity:1;transition:opacity .1s ease-in}",
+    "." + BOX_CLASS + " .vk8bitdo-bar{display:block;margin:7px auto 0;width:56px;height:3px;",
+    "border-radius:2px;background:rgba(255,255,255,.25);overflow:hidden}",
+    "." + BOX_CLASS + " .vk8bitdo-bar i{display:block;height:100%;background:#ff0033}",
+    "." + BOX_CLASS + " .vk8bitdo-tag{display:block;margin-top:4px;font-size:11px;letter-spacing:.8px;",
+    "color:#ff4e6a;text-transform:uppercase}",
+    "." + BOX_CLASS + ".vk8bitdo-above{position:absolute;top:auto;bottom:calc(100% + 12px)}",
+  ].join("");
+  let boxEl = null;
+  let boxTimer = 0;
+
+  function shownSize(el) {
+    return !!el && el.offsetWidth > 0 && el.offsetHeight > 0;
+  }
+
+  // Where the box goes: YouTube -> the active player; YouTube Music -> the
+  // player page (video / album art) when open, else above the player bar.
+  function boxHost(p) {
+    if (site === "ytmusic") {
+      const page = document.querySelector("ytmusic-player#player") || document.querySelector("ytmusic-player");
+      if (shownSize(page) && page.offsetHeight >= 120) return { el: page, above: false };
+      const bar = document.querySelector("ytmusic-player-bar");
+      if (shownSize(bar)) return { el: bar, above: true };
+      return null;
+    }
+    return shownSize(p) ? { el: p, above: false } : null;
+  }
+
+  function ensureStyle() {
+    if (document.getElementById("vk8bitdo-box-style")) return;
+    const st = document.createElement("style");
+    st.id = "vk8bitdo-box-style";
+    st.textContent = BOX_CSS;
+    (document.head || document.documentElement).appendChild(st);
+  }
+
+  // percent: effective volume 0-150, or null for "Muted".
+  function showBox(p, percent) {
+    try {
+      const host = boxHost(p);
+      if (!host) return;
+      ensureStyle();
+      if (!boxEl) {
+        boxEl = document.createElement("div");
+        boxEl.className = BOX_CLASS;
+        boxEl.setAttribute("aria-hidden", "true");
+      }
+      if (boxEl.parentNode !== host.el) host.el.appendChild(boxEl);
+      boxEl.classList.toggle("vk8bitdo-above", host.above);
+      while (boxEl.firstChild) boxEl.removeChild(boxEl.firstChild);
+      const num = document.createElement("span");
+      num.textContent = percent === null ? "Muted" : Math.round(percent) + "%";
+      boxEl.appendChild(num);
+      if (percent !== null && percent > 100) {
+        const bar = document.createElement("span");
+        bar.className = "vk8bitdo-bar";
+        const fill = document.createElement("i");
+        fill.style.width = Math.min(100, Math.max(0, (percent - 100) / (HARD_MAX - 100) * 100)) + "%";
+        bar.appendChild(fill);
+        boxEl.appendChild(bar);
+        const tag = document.createElement("span");
+        tag.className = "vk8bitdo-tag";
+        tag.textContent = "Boost";
+        boxEl.appendChild(tag);
+      }
+      boxEl.classList.add("vk8bitdo-on");
+      if (boxTimer) clearTimeout(boxTimer);
+      boxTimer = setTimeout(() => {
+        boxTimer = 0;
+        if (boxEl) boxEl.classList.remove("vk8bitdo-on");
+      }, BOX_MS);
+    } catch (e) { /* the box is only a hint: never break the volume */ }
+  }
+
+  function hideBox() {
+    if (boxTimer) { clearTimeout(boxTimer); boxTimer = 0; }
+    if (boxEl) boxEl.classList.remove("vk8bitdo-on");
+  }
+
+  // ---- YouTube's own volume bubble (0-100 % and Muted) ----------------------------
+  // YouTube shows "95%" for its arrow keys with its "bezel" layer: a hidden
+  // <div data-layer> holding .ytp-bezel-text-wrapper > .ytp-bezel-text and
+  // .ytp-bezel > .ytp-bezel-icon; showing that layer (display none -> "") starts
+  // its CSS fade-out animations, and YouTube hides the layer again afterwards.
+  // We do the same with our value (no key presses: those would move 5 %). These
+  // are YouTube internals: everything is checked, and if anything is missing or
+  // doesn't start, our own box is shown instead.
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const ICON_VOLUME = "M8,21 L12,21 L17,26 L17,10 L12,15 L8,15 L8,21 Z M19,14 L19,22 C20.48,21.32 21.5,19.77 21.5,18 C21.5,16.26 20.48,14.74 19,14 Z";
+  const ICON_MUTED = "m 21.48,17.98 c 0,-1.77 -1.02,-3.29 -2.5,-4.03 v 2.21 l 2.45,2.45 c .03,-0.2 .05,-0.41 .05,-0.63 z " +
+    "m 2.5,0 c 0,.94 -0.2,1.82 -0.54,2.64 l 1.51,1.51 c .66,-1.24 1.03,-2.65 1.03,-4.15 0,-4.28 -2.99,-7.86 -7,-8.76 v 2.05 " +
+    "c 2.89,.86 5,3.54 5,6.71 z M 9.25,8.98 l -1.27,1.26 4.72,4.73 H 7.98 v 6 H 11.98 l 5,5 v -6.73 l 4.25,4.25 " +
+    "c -0.67,.52 -1.42,.93 -2.25,1.18 v 2.06 c 1.38,-0.31 2.63,-0.95 3.69,-1.81 l 2.04,2.05 1.27,-1.27 -9,-9 -7.72,-7.72 z " +
+    "m 7.72,.99 -2.09,2.08 2.09,2.09 V 9.98 z";
+  let bubble = null;      // { layer, text } of the bubble we showed last
+  let bubbleTimer = 0;
+
+  function ytBezel(p) {
+    if (site !== "youtube" || !p || typeof p.querySelector !== "function") return null;
+    const wrap = p.querySelector(".ytp-bezel-text-wrapper");
+    const text = wrap && wrap.querySelector(".ytp-bezel-text");
+    const layer = wrap && wrap.parentElement;
+    if (!text || !layer || layer === p || !layer.style) return null;
+    const bezel = layer.querySelector(".ytp-bezel");
+    const icon = bezel && bezel.querySelector(".ytp-bezel-icon");
+    return { layer, wrap, text, bezel, icon };
+  }
+
+  function setIcon(icon, muted) {
+    if (!icon || !document.createElementNS) return;
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("height", "100%");
+    svg.setAttribute("width", "100%");
+    svg.setAttribute("viewBox", "0 0 36 36");
+    const path = document.createElementNS(SVG_NS, "path");
+    path.setAttribute("d", muted ? ICON_MUTED : ICON_VOLUME);
+    path.setAttribute("fill", "#fff");
+    svg.appendChild(path);
+    while (icon.firstChild) icon.removeChild(icon.firstChild);
+    icon.appendChild(svg);
+  }
+
+  function seconds(list) {
+    return String(list || "").split(",").map((s) => parseFloat(s) * (/ms\s*$/.test(s) ? 0.001 : 1))
+      .filter((n) => Number.isFinite(n));
+  }
+
+  function hideBubble() {
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = 0; }
+    const b = bubble;
+    bubble = null;
+    // Only hide it if it still shows what we put there (YouTube may have reused it).
+    if (b && b.layer.style.display !== "none" && b.textEl.textContent === b.text) b.layer.style.display = "none";
+  }
+
+  // percent: 0-100, or null for "Muted". Returns true if YouTube's bubble shows it.
+  // What we change in YouTube's bubble, so it can be put back exactly if the
+  // bubble doesn't work (YouTube's next play/pause bubble must look normal).
+  function saveBezel(z) {
+    return {
+      text: z.text.textContent,
+      hide: z.wrap.classList.contains("ytp-bezel-text-hide"),
+      icon: z.icon ? Array.from(z.icon.childNodes || z.icon.children || []) : null,
+      aria: z.bezel ? z.bezel.getAttribute("aria-label") : null,
+      display: z.layer.style.display,
+    };
+  }
+
+  function restoreBezel(z, s) {
+    try {
+      z.text.textContent = s.text;
+      if (s.hide) z.wrap.classList.add("ytp-bezel-text-hide");
+      if (z.icon && s.icon) {
+        while (z.icon.firstChild) z.icon.removeChild(z.icon.firstChild);
+        s.icon.forEach((n) => z.icon.appendChild(n));
+      }
+      if (z.bezel) {
+        if (s.aria === null) z.bezel.removeAttribute("aria-label");
+        else z.bezel.setAttribute("aria-label", s.aria);
+      }
+      z.layer.style.display = s.display === "" ? "none" : s.display;
+    } catch (e) { /* nothing more we can do */ }
+  }
+
+  function showYtBubble(p, percent) {
+    let z = null;
+    let saved = null;
+    try {
+      z = ytBezel(p);
+      if (!z) return false;
+      const text = percent === null ? "Muted" : Math.round(percent) + "%";
+      if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = 0; }
+      saved = saveBezel(z);
+      z.text.textContent = text;
+      z.wrap.classList.remove("ytp-bezel-text-hide");
+      setIcon(z.icon, percent === null);
+      if (z.bezel) z.bezel.setAttribute("aria-label", text);
+      // Restart YouTube's fade-out animations: hide, force a layout, show.
+      z.layer.style.display = "none";
+      void z.layer.offsetWidth;
+      z.layer.style.display = "";
+      const cs = getComputedStyle(z.wrap);
+      if (getComputedStyle(z.layer).display === "none" || !cs.animationName || cs.animationName === "none") {
+        restoreBezel(z, saved);
+        bubble = null;
+        return false;
+      }
+      const dur = seconds(cs.animationDuration);
+      const delay = seconds(cs.animationDelay);
+      let ms = 0;
+      dur.forEach((d, i) => { ms = Math.max(ms, (d + (delay[i] || 0)) * 1000); });
+      if (!(ms > 0 && ms < 5000)) ms = 1000;
+      bubble = { layer: z.layer, textEl: z.text, text };
+      bubbleTimer = setTimeout(() => { bubbleTimer = 0; hideBubble(); }, ms + 100);
+      return true;
+    } catch (e) {
+      if (z && saved) restoreBezel(z, saved);
+      bubble = null;
+      return false;
+    }
+  }
+
+  // After a knob click: YouTube's own bubble for 0-100 % and Muted, our box for
+  // the boost (over 100 %), on YouTube Music, and whenever the bubble fails.
+  function showIndicator(p, percent) {
+    try {
+      if ((percent === null || percent <= 100) && showYtBubble(p, percent)) {
+        hideBox();
+        return;
+      }
+      hideBubble();
+    } catch (e) { /* fall through to our box */ }
+    showBox(p, percent);
+  }
+
+  // Test probe: which indicator shows now ("yt:76%" / "own:135%Boost" / null).
+  function boxText() {
+    if (bubble && bubble.layer.style.display !== "none") return "yt:" + bubble.textEl.textContent;
+    if (!boxEl || !boxEl.parentNode || !boxEl.classList.contains("vk8bitdo-on")) return null;
+    return "own:" + boxEl.textContent;
+  }
+
   // Commands are queued so a fast knob spin is applied in order.
   let chain = Promise.resolve();
   function apply(cmd) {
@@ -318,6 +554,7 @@
       await setEffective(p, target);
       exact = target;
       rememberVolume(p);
+      showIndicator(p, effectivePercent(p));
     } else if (cmd.type === "set_volume") {
       exact = null;
       // Exact, and mute is left alone (used by the program's failsafe).
@@ -328,6 +565,7 @@
       const target = typeof cmd.muted === "boolean" ? cmd.muted : !isMuted;
       setMuted(p, target);
       rememberVolume(p);
+      showIndicator(p, target ? null : effectivePercent(p));
     } else if (cmd.type === "probe") {
       // Used by the tests only: report what the page's own controls show.
       const s = ytmSlider();
@@ -341,6 +579,7 @@
         ytSlider: panel ? panel.getAttribute("aria-valuenow") : null,
         ytmSlider: s ? s.value : null,
         saved,
+        box: boxText(),
       });
     }
   }

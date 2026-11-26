@@ -100,6 +100,7 @@
         ytSlider: msg.ytSlider == null ? null : String(msg.ytSlider).slice(0, 16),
         ytmSlider: msg.ytmSlider == null ? null : String(msg.ytmSlider).slice(0, 16),
         saved: msg.saved == null ? null : String(msg.saved).slice(0, 512),
+        box: msg.box == null ? null : String(msg.box).slice(0, 32),
       });
       return;
     }

@@ -18,7 +18,7 @@ import threading
 from version import VERSION
 
 from . import display as view
-from . import gdi, osd
+from . import gdi, menu, osd
 
 log = logging.getLogger("knob.ui")
 
@@ -87,7 +87,7 @@ WM_DESTROY, WM_CLOSE, WM_TIMER, WM_HOTKEY = 0x2, 0x10, 0x113, 0x312
 WM_NULL, WM_MOUSEACTIVATE, MA_NOACTIVATE = 0x0, 0x21, 3
 WM_CONTEXTMENU, WM_RBUTTONUP = 0x7B, 0x205
 WM_APP = 0x8000
-WM_APP_SHOW, WM_APP_TRAY = WM_APP + 1, WM_APP + 2
+WM_APP_SHOW, WM_APP_TRAY, WM_APP_CMD = WM_APP + 1, WM_APP + 2, WM_APP + 3
 OSD_TIMER = 1
 NIM_ADD, NIM_MODIFY, NIM_DELETE, NIM_SETVERSION = 0, 1, 2, 4
 NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_SHOWTIP = 0x1, 0x2, 0x4, 0x80
@@ -100,6 +100,11 @@ MSGFLT_ALLOW = 1
 CMD_PAUSE, CMD_LOG, CMD_SETTINGS, CMD_QUIT = 1, 2, 3, 4
 ICON_CACHE = 64
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
+
+
+def _signed16(v):
+    v &= 0xFFFF
+    return v - 0x10000 if v & 0x8000 else v
 
 
 # ------------------------------------------------------------ the knob icon
@@ -131,8 +136,88 @@ def knob_shapes(pct, muted, paused):
     return shapes
 
 
-def icon_pixels(size, pct, muted=False, paused=False):
-    """size x size straight-alpha BGRA (top-down) of the knob icon."""
+# 3x5 pixel digits for the number strip on small icons (16-20 px)
+DIGITS_3X5 = {"0": "111101101101111", "1": "010110010010111", "2": "111001111100111",
+              "3": "111001111001111", "4": "101101111001001", "5": "111100111001111",
+              "6": "111100111101111", "7": "111001001001001", "8": "111101111101111",
+              "9": "111101111001111"}
+STRIP = "#111114"
+STRIP_ALPHA = 235
+TRAY_STYLES = ("knob_number", "knob")
+
+
+def strip_height(size):
+    """Height of the number strip along the bottom of the icon."""
+    return 6 if size <= 20 else int(size * 0.36)
+
+
+def _over(out, i, colour, alpha):
+    """Paint colour (#RRGGBB) with alpha over straight-alpha BGRA pixel i."""
+    if alpha <= 0:
+        return
+    r, g, b = int(colour[1:3], 16), int(colour[3:5], 16), int(colour[5:7], 16)
+    da = out[i + 3]
+    oa = alpha + da * (255 - alpha) // 255
+    if oa <= 0:
+        return
+    for k, src in ((0, b), (1, g), (2, r)):
+        out[i + k] = min(255, (src * alpha + out[i + k] * da * (255 - alpha) // 255) // oa)
+    out[i + 3] = oa
+
+
+def _pixel_digits(out, size, text, top, colour):
+    w, h = 3, 5
+    total = len(text) * w + (len(text) - 1)
+    x0 = (size - total) // 2
+    for k, ch in enumerate(text):
+        bits = DIGITS_3X5[ch]
+        for yy in range(h):
+            for xx in range(w):
+                if bits[yy * w + xx] == "1":
+                    x, y = x0 + k * (w + 1) + xx, top + yy
+                    if 0 <= x < size and 0 <= y < size:
+                        _over(out, (y * size + x) * 4, colour, 255)
+
+
+def _font_digits(out, size, text, top, height, colour):
+    """Bold narrow Segoe UI digits (24 px and up), anti-aliased."""
+    with gdi.Bitmap(size, height) as bm:
+        bm.text(text, 0, 0, size, height, height * 1.05, "#FFFFFF", weight=700,
+                align=gdi.DT_CENTER, width=int(height * 0.42))
+        cov = bm.read()
+    for y in range(height):
+        for x in range(size):
+            a = cov[(y * size + x) * 4 + 1]
+            if a and 0 <= top + y < size:
+                _over(out, ((top + y) * size + x) * 4, colour, a)
+
+
+def add_number(out, size, pct, muted):
+    """The % on a dark strip along the bottom (tray_style "knob_number")."""
+    sh = strip_height(size)
+    top = size - sh
+    for y in range(top, size):
+        for x in range(size):
+            _over(out, (y * size + x) * 4, STRIP, STRIP_ALPHA)
+    colour = GREY if muted else (ORANGE if pct > 100 else WHITE)
+    text = str(max(0, min(150, int(pct))))
+    if size <= 20:
+        _pixel_digits(out, size, text, top + (sh - 5) // 2, colour)
+    else:
+        _font_digits(out, size, text, top, sh, colour)
+
+
+def icon_pixels(size, pct, muted=False, paused=False, number=False):
+    """size x size straight-alpha BGRA (top-down) of the knob icon; with
+    number=True the % sits on a strip along the bottom (not when paused or
+    before the first reading)."""
+    out = _knob_pixels(size, pct, muted, paused)
+    if number and pct is not None and not paused:
+        add_number(out, size, pct, muted)
+    return out
+
+
+def _knob_pixels(size, pct, muted, paused):
     n = size * SUPERSAMPLE
     u = n / 32.0
     with gdi.Bitmap(n, n) as colour, gdi.Bitmap(n, n) as mask:
@@ -178,11 +263,14 @@ def make_hicon(size, pixels):
 
 
 class IconCache:
-    """HICONs per (size, percent, muted, paused); the oldest are destroyed."""
+    """HICONs per (size, percent, muted, paused); the oldest are destroyed.
+    style: "knob_number" (knob + % strip) or "knob"."""
 
-    def __init__(self, limit=ICON_CACHE, maker=None):
+    def __init__(self, limit=ICON_CACHE, maker=None, style="knob_number"):
         self.limit = limit
-        self.maker = maker or (lambda size, key: make_hicon(size, icon_pixels(size, *key)))
+        number = style != "knob"
+        self.maker = maker or (lambda size, key: make_hicon(
+            size, icon_pixels(size, *key, number=number)))
         self._icons = collections.OrderedDict()
         self.destroy = user32.DestroyIcon
 
@@ -219,7 +307,7 @@ class Tray:
     def __init__(self, hwnd, notify=None, icons=None, size=None):
         self.hwnd = hwnd
         self.notify = notify
-        self.icons = icons or IconCache()
+        self.icons = icons if icons is not None else IconCache()  # (an empty cache is falsy)
         self.size = size
         self.added = False
         self.v4 = False
@@ -323,6 +411,9 @@ class Ui:
         self.osd_on = bool(settings.get("osd", True))
         self.tray_on = bool(settings.get("tray_icon", True))
         self.osd_ms = int(float(settings.get("osd_seconds", 1.5)) * 1000)
+        self.osd_monitor = settings.get("osd_monitor", "primary")
+        self.tray_style = settings.get("tray_style", "knob_number")
+        self.menu = None
         self.on_quit = on_quit
         self.on_pause = on_pause
         self.on_key = on_key
@@ -379,9 +470,15 @@ class Ui:
                                            0, 0, 0, 0, None, None, self._hinst, None)
                 if not h:
                     raise OSError(f"CreateWindowExW (pop-up) failed ({ctypes.get_last_error()})")
-                self.osd = osd.Osd(h)
+                self.osd = osd.Osd(h, self.osd_monitor)
             if self.tray_on:
-                self.tray = Tray(self.hwnd, notify=self.notify)
+                h = user32.CreateWindowExW(menu.EX_STYLE, CLASS_NAME, view.TITLE, osd.WS_POPUP,
+                                           0, 0, 0, 0, None, None, self._hinst, None)
+                if not h:
+                    raise OSError(f"CreateWindowExW (menu) failed ({ctypes.get_last_error()})")
+                self.menu = menu.Menu(h, self._choose)
+                self.tray = Tray(self.hwnd, notify=self.notify,
+                                 icons=IconCache(style=self.tray_style))
                 if not self.tray.add(self.icon_key(), self.tip()):
                     log.info("tray icon not added yet (taskbar not ready); waiting for it")
         except Exception:
@@ -399,6 +496,9 @@ class Ui:
         if self.osd:
             user32.DestroyWindow(self.osd.hwnd)
             self.osd = None
+        if self.menu:
+            hwnd, self.menu = self.menu.hwnd, None
+            user32.DestroyWindow(hwnd)
         if self.hwnd:
             user32.KillTimer(self.hwnd, OSD_TIMER)
             user32.DestroyWindow(self.hwnd)
@@ -467,46 +567,56 @@ class Ui:
         elif cmd == CMD_QUIT:
             if self.osd:
                 self.osd.hide()
+            if self.menu:
+                self.menu.close()
             self.on_quit()
 
-    def _menu(self):
-        menu = user32.CreatePopupMenu()
-        if not menu:
+    def _choose(self, cmd):
+        """Menu item chosen (the menu is already closed): run it from the queue."""
+        user32.PostMessageW(self.hwnd, WM_APP_CMD, cmd, 0)
+
+    def open_menu(self, anchor=None):
+        """Our dark/light menu at the click point (screen coordinates)."""
+        if not self.menu:
             return
-        try:
-            for cmd, text, enabled in menu_items(self.paused, self.keys_ok):
-                if cmd is None:
-                    user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
-                else:
-                    user32.AppendMenuW(menu, MF_STRING | (0 if enabled else MF_GRAYED), cmd, text)
+        if self.menu.visible:
+            self.menu.close()  # right-click on the icon while open: toggle closed
+            return
+        if self.menu.just_closed():
+            return  # this click took the menu out of front and closed it: stay closed
+        if anchor is None:
             pt = wt.POINT()
             user32.GetCursorPos(ctypes.byref(pt))
-            user32.SetForegroundWindow(self.hwnd)  # so the menu closes when clicking away
-            cmd = user32.TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
-                                        pt.x, pt.y, 0, self.hwnd, None)
-            user32.PostMessageW(self.hwnd, WM_NULL, 0, 0)
-        finally:
-            user32.DestroyMenu(menu)
-        if cmd:
-            self.command(cmd)
+            anchor = (pt.x, pt.y)
+        self.menu.open(menu_items(self.paused, self.keys_ok), anchor)
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         try:
-            if hwnd == self.hwnd:
+            if self.menu and hwnd == self.menu.hwnd:
+                r = self.menu.handle(msg, wparam, lparam)
+                if r is not None:
+                    return r
+            elif hwnd == self.hwnd:
                 if msg == WM_APP_SHOW:
                     self.apply_pending()
+                    return 0
+                if msg == WM_APP_CMD:
+                    self.command(wparam)
                     return 0
                 if msg == WM_APP_TRAY:
                     event = lparam & 0xFFFF
                     if event == (WM_CONTEXTMENU if self.tray and self.tray.v4 else WM_RBUTTONUP):
-                        self._menu()
+                        anchor = None
+                        if self.tray and self.tray.v4:  # version 4: wParam = click point
+                            anchor = (_signed16(wparam), _signed16(wparam >> 16))
+                        self.open_menu(anchor)
                     return 0
                 if msg == WM_TIMER and wparam == OSD_TIMER:
                     user32.KillTimer(hwnd, OSD_TIMER)
                     if self.osd:
                         self.osd.hide()
                     return 0
-                if msg == WM_HOTKEY:  # only arrives here while the menu is open
+                if msg == WM_HOTKEY:  # normally handled in run_loop before dispatch
                     if self.on_key and not self.paused:
                         from .hotkeys import HOTKEYS
                         if wparam in HOTKEYS:
@@ -518,7 +628,7 @@ class Ui:
                     return 0
                 if msg == WM_CLOSE:
                     return 0  # only Quit stops the program
-            elif msg == WM_MOUSEACTIVATE:
+            elif self.osd and hwnd == self.osd.hwnd and msg == WM_MOUSEACTIVATE:
                 return MA_NOACTIVATE
         except Exception:
             log.exception("window message %#x failed", msg)

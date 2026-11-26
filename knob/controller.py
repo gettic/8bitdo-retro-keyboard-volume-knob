@@ -11,6 +11,7 @@ from .failsafe import Failsafe
 log = logging.getLogger("knob.controller")
 
 BRAVE = "brave.exe"
+SPOTIFY = "spotify.exe"
 POLL_INTERVAL = 0.2
 REFRESH_INTERVAL = 2.0
 GUESS_SECONDS = 1.0  # a tab's predicted volume wins over its (older) reported state this long
@@ -26,8 +27,12 @@ class Controller:
     it is called on the controller's own thread (COM is per thread)."""
 
     def __init__(self, settings, audio_factory, bridge, clock=time.monotonic,
-                 process_lister=_running_exes, display=None):
+                 process_lister=_running_exes, display=None, spotify=None):
         self.settings = settings
+        # spotify: spotify_api.SpotifyVolume (Spotify's own bar) or None (mixer only)
+        self.spotify = spotify
+        if spotify is not None:
+            spotify.on_change = lambda: self.keys.put(("spotify",))
         # display(rows, popup): pop-up / tray icon sink (ui.Ui.show), called on this thread
         self.display = display
         self._shown = None      # sources the knob changed last: ("app", exe) / ("tab", client, id)
@@ -102,7 +107,12 @@ class Controller:
         self._sessions = self.audio.sessions(self._wanted_apps())
         self._refreshed = now
         self.activity.forget_except({s.exe for s in self._sessions})
+        if self.spotify is not None:
+            self.spotify.set_present(any(s.exe == SPOTIFY for s in self._sessions))
         return True
+
+    def _spotify_web(self, exe):
+        return exe == SPOTIFY and self.spotify is not None and self.spotify.usable()
 
     def poll(self):
         if self.refresh():
@@ -141,6 +151,16 @@ class Controller:
         d = router.decide(action, apps, tabs, self.settings["step"])
         log.debug("key %s -> %r", action, d)
         for exe in d.apps:
+            if d.muted is None and self._spotify_web(exe):
+                # Spotify's own bar; mute (and un-muting on a turn) stays the Windows mixer's
+                for s in by_exe[exe]:
+                    try:
+                        if s.muted():
+                            s.set_mute(False)
+                    except OSError:
+                        self._refreshed = None
+                self.spotify.step(d.delta)
+                continue
             for s in by_exe[exe]:
                 try:
                     if d.muted is not None:
@@ -208,14 +228,16 @@ class Controller:
 
     # One small reader per source, so a different way of setting a source's
     # volume only needs its reader changed.
-    @staticmethod
-    def _read_app(exe, group):
-        """Row for a Windows app from its audio sessions (Core Audio volume)."""
+    def _read_app(self, exe, group):
+        """Row for a Windows app: Spotify's own bar while the Web API drives it,
+        else its audio sessions (Core Audio volume). Mute is always the mixer's."""
         if not group:
             return None
         try:
-            return view.Row(view.name_for(exe), group[0].volume(),
-                            all(s.muted() for s in group), 1.0)
+            level = self.spotify.level() if self._spotify_web(exe) else None
+            if level is None:
+                level = group[0].volume()
+            return view.Row(view.name_for(exe), level, all(s.muted() for s in group), 1.0)
         except OSError:
             return None
 
@@ -287,6 +309,9 @@ class Controller:
 
     def on_event(self, event):
         now = self.clock()
+        if event[0] == "spotify":  # Spotify's own volume / Web API state changed
+            self.update_display()
+            return
         if event[0] == "gone":
             self.failsafe.host_gone(event[1])
             self.update_display()

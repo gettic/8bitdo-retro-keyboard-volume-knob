@@ -6,7 +6,8 @@ The knob changes the volume of the app that is playing:
 
 | App | How it is changed |
 |---|---|
-| Spotify (and other apps you list) | Windows' own per-app volume |
+| Spotify | Spotify's own volume bar, after a [one-time setup](#spotifys-own-volume-bar) (Spotify Premium). Without it: Windows' own per-app volume |
+| Other apps you list | Windows' own per-app volume |
 | YouTube and YouTube Music in Brave | A small Brave extension that moves the player's volume slider |
 
 If nothing is playing, the knob changes all of them. The mute key mutes and unmutes them together.
@@ -18,18 +19,22 @@ While the program runs, it takes over the volume keys: Windows' own master volum
 When you turn the knob, a small card shows at the bottom of the screen, like the one Windows has. It shows the app's name (Spotify, YouTube or YouTube Music; one block each when the knob changes more than one), the volume in %, and a bar. Above 100 % the bar turns orange, with a mark at 100 %. A muted app shows "Muted".
 
 - It goes away 1.5 seconds after the last turn.
-- It appears on the screen where the mouse is.
+- It appears on your main screen. To show it on the screen where the mouse is, set `osd_monitor` to `"mouse"`.
 - It never takes focus, and clicks go through it.
 - It follows Windows' dark or light mode.
 - It is not shown over games in exclusive full screen.
 
-You can turn it off or change how long it stays in the [settings](#settings) (`osd`, `osd_seconds`).
+You can turn it off, change how long it stays or which screen it uses in the [settings](#settings) (`osd`, `osd_seconds`, `osd_monitor`).
+
+### YouTube's own bubble
+
+On YouTube, from 0 to 100 %, the knob shows YouTube's own volume bubble (the same one its arrow keys show, with "Muted" too). This is YouTube's own volume: its slider moves and it is remembered. Above 100 % a small box in YouTube's style shows the boost (for example "135%") with a thin red bar and "BOOST". If YouTube's bubble isn't available (for example in an embedded video), the small box shows the volume instead. YouTube Music has no bubble of its own, so the small box shows there. Nothing extra shows when you use YouTube's own controls.
 
 ## Tray icon
 
-The program puts a knob icon in the notification area by the clock. Its pointer turns with the volume. It is orange when the volume is boosted above 100 %, and grey when muted or paused. Hover over it to see the exact volume, for example `8BitDo Volume Knob - Spotify 45%`.
+The program puts a knob icon in the notification area by the clock. Its pointer turns with the volume, and a small number on a dark strip along the bottom shows the volume in %. It is orange when the volume is boosted above 100 %, and grey when muted or paused (no number while paused). For the plain knob without the number, set `tray_style` to `"knob"`. Hover over it to see the exact volume, for example `8BitDo Volume Knob - Spotify 45%`.
 
-Right-click the icon for this menu:
+Right-click the icon for this menu. It is dark in Windows dark mode and light in light mode. Use the mouse or the keyboard (arrows, Enter, Esc). It closes when you click elsewhere:
 
 | Item | What it does |
 |---|---|
@@ -39,6 +44,33 @@ Right-click the icon for this menu:
 | Quit | Stops the program. |
 
 On Windows 11, a new icon may first be hidden under the ^ arrow by the clock. Drag it onto the taskbar to keep it in view. You can hide the icon with the `tray_icon` setting.
+
+## Spotify's own volume bar
+
+This needs Spotify Premium. Do the setup once. After that the knob moves the volume bar inside Spotify, in the same 1.3 % steps, up to 100 %. Spotify's volume shown in the card and tray icon is Spotify's own.
+
+Setup:
+
+1. Go to [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard), log in with your Spotify account and accept the Developer Terms if asked.
+2. Click **Create app**.
+3. Fill in App name `8BitDo volume knob`, App description `Volume knob on my PC`, leave Website empty, and Redirect URI `http://127.0.0.1:38480/callback`. Click **Add** next to the Redirect URI.
+4. Tick **Web API** only, tick the terms box, click **Save**.
+5. Open the app's **Settings** and copy the **Client ID**. You don't need the Client secret.
+6. With Spotify open on this PC, run this in a terminal and paste the Client ID when asked:
+
+   ```
+   py -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py" --spotify-login
+   ```
+7. Your browser opens a Spotify page. Click **Agree**. The page says "Spotify connected". The running knob uses it within a few seconds, with no restart.
+
+Spotify changes its dashboard now and then, so a field name may differ a little.
+
+Things to know:
+
+- It works only while Spotify plays on this PC. If Spotify plays on another device (your phone), or you are not logged in, or there is no internet, or Spotify refuses, the knob uses Windows' per-app volume as before.
+- Mute is still Windows' mute.
+- To go back to Windows' per-app volume only, set `spotify_control` to `"mixer"`.
+- To remove the login, run the same command with `--spotify-logout`. You can also remove the app at spotify.com under Account, Apps.
 
 ## Louder than 100 % on YouTube
 
@@ -118,7 +150,7 @@ It also removes the browser registry keys that version 1.0 made. Uninstall remov
 
 ## Privacy
 
-Nothing leaves your PC. The program and the extension send nothing over the internet. The extension tells the program only each tab's volume, mute and whether it is playing. It never sends page titles or addresses.
+Nothing leaves your PC, except talking to Spotify if you did the [Spotify setup](#spotifys-own-volume-bar): then the program asks Spotify for the volume and sets it. The login is saved in `%APPDATA%\8BitDo Volume Knob\spotify.json` (the login token is encrypted for your Windows user). The extension sends nothing over the internet. It tells the program only each tab's volume, mute and whether it is playing. It never sends page titles or addresses.
 
 ## Update
 
@@ -156,7 +188,10 @@ The program creates `%APPDATA%\8BitDo Volume Knob\settings.json` the first time 
 | `hold_seconds` | 1.5 | How long an app counts as playing after its last sound. |
 | `osd` | true | Show the [volume card](#volume-card) when you turn the knob. |
 | `osd_seconds` | 1.5 | How long the card stays after the last turn. Range 0.5 to 10. |
+| `osd_monitor` | `"primary"` | Which screen shows the card: `"primary"` = the main screen, `"mouse"` = the screen with the mouse. |
 | `tray_icon` | true | Show the [tray icon](#tray-icon). |
+| `tray_style` | `"knob_number"` | `"knob"` = the plain knob without the % number. |
+| `spotify_control` | `"web"` | `"web"` = [Spotify's own volume bar](#spotifys-own-volume-bar) once set up. `"mixer"` = always Windows' per-app volume. |
 | `log_level` | INFO | `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
 
 A bad value is ignored and the default is used instead.
@@ -174,7 +209,9 @@ py -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py" --self-test
 | Command | What it does |
 |---|---|
 | `--stop` | Stops the running program. |
-| `--self-test` | Checks that everything works, without changing anything. It includes a "browser link" line. |
+| `--self-test` | Checks that everything works, without changing anything. It includes a "browser link" and a "spotify" line. |
+| `--spotify-login` | The one-time [Spotify setup](#spotifys-own-volume-bar) login. |
+| `--spotify-logout` | Removes the Spotify login. |
 | `--version` | Shows the version. |
 
 ## For developers
@@ -201,7 +238,7 @@ python -E -s -m unittest setup_knob.test_setup
 Build the release zip (no packages needed):
 
 ```
-python -I make_release.py --version 1.2.0
+python -I make_release.py --version 1.3.0
 ```
 
 ## License

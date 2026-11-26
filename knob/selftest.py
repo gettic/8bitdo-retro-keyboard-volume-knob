@@ -187,7 +187,7 @@ def _check_hotkeys(rep):
 def _check_display(rep):
     """Tray icon + pop-up: windows created hidden and destroyed, the tray call
     faked (no icon appears), the pop-up and icons drawn in memory only."""
-    from . import display, osd, ui
+    from . import display, menu, osd, ui
 
     def run():
         calls = []
@@ -197,12 +197,16 @@ def _check_display(rep):
         try:
             shown = []
             u.osd._present = lambda *a: shown.append(a)
-            hidden = not ui.user32.IsWindowVisible(u.hwnd) and not ui.user32.IsWindowVisible(u.osd.hwnd)
+            hidden = not any(ui.user32.IsWindowVisible(h)
+                             for h in (u.hwnd, u.osd.hwnd, u.menu.hwnd))
             row = display.Row("Spotify", 0.45, False, 1.0)
             w, h, data = osd.render([row], 1.0, False)
-            icon = ui.make_hicon(24, ui.icon_pixels(24, 45))
+            mw, mh, mdata = menu.render(ui.menu_items(False), None, 1.0, False)
+            icon = ui.make_hicon(24, ui.icon_pixels(24, 45, number=True))
             ui.user32.DestroyIcon(icon)
-            return hidden, calls[:1] == [ui.NIM_ADD], len(data) == w * h * 4 and data[3] == 0
+            drawn = (len(data) == w * h * 4 and data[3] == 0
+                     and len(mdata) == mw * mh * 4 and mdata[3] == 0)
+            return hidden, calls[:1] == [ui.NIM_ADD], drawn
         finally:
             u.close()
     res, err = _in_thread(run)
@@ -212,6 +216,33 @@ def _check_display(rep):
     hidden, tray, drawn = res
     rep.add("tray icon + pop-up (hidden)", hidden and tray and drawn,
             f"windows hidden={hidden} tray={tray} drawn={drawn}")
+
+
+def _check_spotify(rep, path=None, api_base=None, accounts=None):
+    """Login file readable (DPAPI); only when logged in: one read-only
+    GET /me/player (no volume change; the track is not shown)."""
+    from . import spotify_api as api
+    path = path or api.store_path()
+    if not os.path.exists(path):
+        rep.add("spotify", True, "not logged in (Windows mixer used for Spotify)")
+        return
+    creds = api.load_store(path)
+    if creds is None:
+        rep.add("spotify", False, "login file unreadable; run --spotify-login again")
+        return
+    client = api.Client(creds, path, api_base or api.API, accounts or api.ACCOUNTS)
+    try:
+        p = client.player()
+    except api.ApiError as e:
+        rep.add("spotify", False, e.reason)
+        return
+    dev = p.get("device") if p else None
+    if not isinstance(dev, dict):
+        rep.add("spotify", True, "logged in; no active Spotify device right now")
+        return
+    ours = api.is_this_pc(dev, creds)
+    rep.add("spotify", True, f"logged in; active device on this PC={ours}, "
+                             f"volume {dev.get('volume_percent')}%")
 
 
 def self_test(out_path=None):
@@ -224,6 +255,7 @@ def self_test(out_path=None):
     _check_audio(rep)
     _check_link(rep)
     _check_display(rep)
+    _check_spotify(rep)
     _check_hotkeys(rep)
     return rep.finish()
 

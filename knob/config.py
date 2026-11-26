@@ -18,11 +18,17 @@ DEFAULTS = {
     "failsafe_start_window": 20.0,  # seconds after start in which every tab is checked
     "osd": True,              # volume pop-up on knob turns
     "osd_seconds": 1.5,       # how long the pop-up stays after the last turn
+    "osd_monitor": "primary",  # pop-up on the main screen, or "mouse": the screen with the mouse
     "tray_icon": True,        # knob icon in the notification area (shows the volume)
+    "tray_style": "knob_number",  # knob with the % on a strip along the bottom, or "knob"
+    "spotify_control": "web",  # "web": Spotify's own bar (after --spotify-login), "mixer": Windows mixer
     "log_level": "INFO",
 }
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+OSD_MONITORS = ("primary", "mouse")
+TRAY_STYLES = ("knob_number", "knob")
+SPOTIFY_CONTROLS = ("web", "mixer")
 
 
 def data_dir():
@@ -74,6 +80,24 @@ def validate(raw):
                 out[key] = raw[key]
             else:
                 warnings.append(f"{key}: must be true or false, using default")
+    if "osd_monitor" in raw:
+        mode = str(raw["osd_monitor"]).strip().lower()
+        if mode in OSD_MONITORS:
+            out["osd_monitor"] = mode
+        else:
+            warnings.append('osd_monitor: must be "primary" or "mouse", using primary')
+    if "tray_style" in raw:
+        style = str(raw["tray_style"]).strip().lower()
+        if style in TRAY_STYLES:
+            out["tray_style"] = style
+        else:
+            warnings.append('tray_style: must be "knob_number" or "knob", using knob_number')
+    if "spotify_control" in raw:
+        mode = str(raw["spotify_control"]).strip().lower()
+        if mode in SPOTIFY_CONTROLS:
+            out["spotify_control"] = mode
+        else:
+            warnings.append('spotify_control: must be "web" or "mixer", using web')
     if "log_level" in raw:
         level = str(raw["log_level"]).upper()
         if level in LOG_LEVELS:

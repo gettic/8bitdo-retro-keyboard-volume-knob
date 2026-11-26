@@ -329,6 +329,48 @@ class OsdDrawTests(unittest.TestCase):
             b, g, r, a = data[(by * w + bx) * 4:(by * w + bx) * 4 + 4]
             self.assertTrue(r > 150 and b < 100, (r, g, b))
 
+    def fake_monitors(self, cursor):
+        """Main screen 0..1920 at 100 %, second screen 1920..4480 at 150 %."""
+        mons = {1: ((0, 0, 1920, 1032), 1.0), 2: ((1920, 0, 4480, 1400), 1.5)}
+        saved = osd._cursor, osd._monitor_at, osd._monitor_area
+        osd._cursor = lambda: cursor
+        osd._monitor_at = lambda x, y: 2 if x >= 1920 else 1
+        osd._monitor_area = lambda m: mons[m]
+        self.addCleanup(lambda: setattr(osd, "_cursor", saved[0]) or
+                        setattr(osd, "_monitor_at", saved[1]) or
+                        setattr(osd, "_monitor_area", saved[2]))
+
+    def test_monitor_choice(self):
+        self.fake_monitors((3000, 500))  # mouse on the second screen
+        self.assertEqual(osd.target_monitor("primary"), ((0, 0, 1920, 1032), 1.0))
+        self.assertEqual(osd.target_monitor(), ((0, 0, 1920, 1032), 1.0))
+        self.assertEqual(osd.target_monitor("mouse"), ((1920, 0, 4480, 1400), 1.5))
+        osd._cursor = lambda: None       # no mouse position: main screen
+        self.assertEqual(osd.target_monitor("mouse"), ((0, 0, 1920, 1032), 1.0))
+
+    def test_show_uses_setting(self):
+        self.fake_monitors((3000, 500))
+        old = osd.fullscreen_app
+        osd.fullscreen_app = lambda: False
+        self.addCleanup(lambda: setattr(osd, "fullscreen_app", old))
+        for mode, inside in (("primary", (0, 1920)), ("mouse", (1920, 4480))):
+            o = osd.Osd(0, mode)
+            got = []
+            o._present = lambda x, y, w, h, data: got.append((x, w))
+            self.assertTrue(o.show([Row("Spotify", 0.5, False, 1.0)]))
+            x, w = got[0]
+            self.assertTrue(inside[0] <= x and x + w <= inside[1], (mode, x, w))
+
+    def test_monitor_setting(self):
+        self.assertEqual(config.DEFAULTS["osd_monitor"], "primary")
+        s, w = config.validate({"osd_monitor": "Mouse"})
+        self.assertEqual((s["osd_monitor"], w), ("mouse", []))
+        s, w = config.validate({"osd_monitor": "left"})
+        self.assertEqual(s["osd_monitor"], "primary")
+        self.assertEqual(len(w), 1)
+        s, w = config.validate({"osd_monitor": 3})
+        self.assertEqual((s["osd_monitor"], len(w)), ("primary", 1))
+
     def test_fullscreen_skips(self):
         o = osd.Osd(0)
         old = osd.fullscreen_app

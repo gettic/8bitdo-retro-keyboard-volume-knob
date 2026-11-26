@@ -7,6 +7,7 @@ import logging
 
 import knob.coreaudio
 import knob.hotkeys
+import knob.menu
 import knob.osd
 import knob.ui
 
@@ -28,6 +29,8 @@ knob.hotkeys.run_loop = _blocked
 knob.ui.shell_notify = _blocked        # no icon on the user's taskbar
 knob.ui.open_file = _blocked           # no Notepad
 knob.osd.Osd._present = _blocked       # the pop-up window is never shown
+knob.menu.Menu._present = _blocked     # nor the tray menu
+knob.menu.Menu._activate = _blocked
 
 logging.getLogger("knob").addHandler(logging.NullHandler())
 logging.getLogger("knob").propagate = False

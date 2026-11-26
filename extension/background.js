@@ -212,7 +212,7 @@ chrome.runtime.onConnect.addListener((port) => {
     } else if (msg.type === "probe") {
       // Test diagnostics only: what the page's own controls show.
       post({ type: "probe", tab: tabId, ytSlider: msg.ytSlider,
-             ytmSlider: msg.ytmSlider, saved: msg.saved });
+             ytmSlider: msg.ytmSlider, saved: msg.saved, box: msg.box });
     }
   });
 

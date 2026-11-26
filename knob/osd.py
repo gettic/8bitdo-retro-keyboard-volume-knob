@@ -173,12 +173,19 @@ def fullscreen_app():
     return state.value == QUNS_RUNNING_D3D_FULL_SCREEN
 
 
-def mouse_monitor():
-    """(work area (l, t, r, b), scale) of the monitor with the mouse, else the main one."""
+def _cursor():
+    """Mouse position, or None."""
     pt = wt.POINT()
-    if not user32.GetCursorPos(ctypes.byref(pt)):
-        pt = wt.POINT(0, 0)
-    mon = user32.MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY)
+    return (pt.x, pt.y) if user32.GetCursorPos(ctypes.byref(pt)) else None
+
+
+def _monitor_at(x, y):
+    """Monitor handle at a point; the main monitor if the point is on none."""
+    return user32.MonitorFromPoint(wt.POINT(x, y), MONITOR_DEFAULTTOPRIMARY)
+
+
+def _monitor_area(mon):
+    """(work area (l, t, r, b), scale) of a monitor handle."""
     mi = MONITORINFO()
     mi.cbSize = ctypes.sizeof(MONITORINFO)
     if not mon or not user32.GetMonitorInfoW(mon, ctypes.byref(mi)):
@@ -193,18 +200,28 @@ def mouse_monitor():
     return (w.left, w.top, w.right, w.bottom), dx.value / 96.0
 
 
-class Osd:
-    """The pop-up window. `hwnd` is created by ui.Ui (hidden, layered)."""
+def target_monitor(mode="primary"):
+    """(work area, scale) where the pop-up goes: the main monitor (it always
+    holds point 0,0), or with mode "mouse" the monitor with the mouse."""
+    pt = _cursor() if mode == "mouse" else None
+    x, y = pt if pt is not None else (0, 0)
+    return _monitor_area(_monitor_at(x, y))
 
-    def __init__(self, hwnd):
+
+class Osd:
+    """The pop-up window. `hwnd` is created by ui.Ui (hidden, layered).
+    monitor: "primary" (default) or "mouse" (setting osd_monitor)."""
+
+    def __init__(self, hwnd, monitor="primary"):
         self.hwnd = hwnd
+        self.monitor = monitor
         self.visible = False
 
     def show(self, rows):
         """Draw and show (no focus change). False if nothing was shown."""
         if not rows or fullscreen_app():
             return False
-        work, scale = mouse_monitor()
+        work, scale = target_monitor(self.monitor)
         w, h, data = render(rows, scale, gdi.light_theme())
         x, y = placement(work, w, h, scale)
         self._present(x, y, w, h, data)

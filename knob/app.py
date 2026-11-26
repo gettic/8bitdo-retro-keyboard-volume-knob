@@ -65,7 +65,13 @@ def run_program():
     state = BrowserState()
     bridge = BrowserBridge(state, time.monotonic)
     from .coreaudio import CoreAudio
-    ctl = Controller(settings, CoreAudio, bridge)  # also hooks bridge events
+    spotify = None
+    if settings["spotify_control"] == "web":
+        from .spotify_api import SpotifyVolume
+        spotify = SpotifyVolume()  # does nothing online until --spotify-login was done
+    ctl = Controller(settings, CoreAudio, bridge, spotify=spotify)  # also hooks bridge events
+    if spotify:
+        spotify.start()
     server = None
     try:
         server = WsServer(protocol.ports(), bridge.on_message, bridge.on_connect,
@@ -90,6 +96,8 @@ def run_program():
     finally:
         ctl.stop()
         worker.join(3)
+        if spotify:
+            spotify.close()
         if ui:
             ui.close()
         if server:
@@ -139,6 +147,9 @@ def main(argv=None):
     p.add_argument("--test", action="store_true", help="developer check (see selftest.py)")
     p.add_argument("--self-test", action="store_true", help="read-only health check")
     p.add_argument("--out", help="also write test results to this file")
+    p.add_argument("--spotify-login", action="store_true",
+                   help="one-time Spotify login (Premium) so the knob moves Spotify's own bar")
+    p.add_argument("--spotify-logout", action="store_true", help="remove the Spotify login")
     try:
         args = p.parse_args(argv)
     except SystemExit as e:
@@ -150,6 +161,11 @@ def main(argv=None):
         ok = request_stop()
         _print("stop sent" if ok else "not running")
         return 0
+    if args.spotify_login or args.spotify_logout:
+        from . import spotify_login
+        if args.spotify_logout:
+            return spotify_login.logout(_print)
+        return spotify_login.login(_print)
     if args.self_test or args.test:
         from . import selftest
         if args.self_test:

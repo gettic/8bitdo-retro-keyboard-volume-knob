@@ -205,6 +205,9 @@ class SetupTest(unittest.TestCase):
         os.makedirs(lay.roaming_dir)
         with open(os.path.join(lay.roaming_dir, "settings.json"), "w") as f:
             f.write("{}")
+        spotify = os.path.join(lay.roaming_dir, "spotify.json")  # encrypted Spotify login
+        with open(spotify, "w") as f:
+            f.write('{"refresh_token": "test-only"}')
         with open(os.path.join(lay.local_dir, "volume_knob.log"), "w") as f:
             f.write("log")
         setup._set_value(lay.approved_key, setup.RUN_VALUE, "x")
@@ -214,9 +217,24 @@ class SetupTest(unittest.TestCase):
         self.assertEqual(rc, 0, text)
         self.assertEqual(self.elevated[-1][1][2], "--elevated-remove")
         self.assertFalse(setup._same(self.elevated[-1][2], pd))  # not working inside it
-        for path in (lay.local_dir, lay.roaming_dir, pd, lay.shortcut):
+        for path in (lay.local_dir, lay.roaming_dir, pd, lay.shortcut, spotify):
             self.assertFalse(os.path.exists(path), path)
         self.assertFalse(setup.key_exists(lay.test_key))
+
+    def test_all_knob_modules_are_copied(self):
+        # Every program module in code\knob\ (e.g. spotify_api.py, spotify_login.py, menu.py)
+        # is in the copy list, without listing them one by one; tests never are.
+        exp = setup.expected_files(self.src)
+        for name in os.listdir(os.path.join(CODE, "knob")):
+            if name.endswith(".py"):
+                rel = os.path.join("knob", name)
+                if name.startswith("test_"):
+                    self.assertNotIn(rel, exp)
+                else:
+                    self.assertIn(rel, exp)
+        for name in ("spotify_api.py", "spotify_login.py", "menu.py"):
+            if os.path.exists(os.path.join(CODE, "knob", name)):
+                self.assertIn(os.path.join("knob", name), exp)
 
     def test_run_value_option(self):
         lay = self.layout
