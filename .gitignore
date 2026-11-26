@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.spec
+*.egg-info/
+
+# Editors and OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# Secrets
+.env*
+*.pem
+*.key
+*.p12
+*.pfx
+*.keystore
+credentials*.json
+.dev.vars
