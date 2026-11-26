@@ -80,19 +80,47 @@ def run_program():
         bridge.send = None
         server = None
 
+    ui = _make_ui(settings, ctl, stop, log)
+    ctl.display = ui.show if ui else None
     worker = threading.Thread(target=ctl.run, name="audio", daemon=True)
     worker.start()
     try:
-        hotkeys.run_loop(ctl.press, stop)
+        hotkeys.run_loop(ctl.press, stop, hwnd=ui.hwnd if ui else None,
+                         on_status=ui.keys_status if ui else None)
     finally:
         ctl.stop()
         worker.join(3)
+        if ui:
+            ui.close()
         if server:
             server.close()
         kernel32.CloseHandle(stop)
         log.info("volume knob stopped")
         kernel32.CloseHandle(mutex)
     return 0
+
+
+def _make_ui(settings, ctl, stop, log):
+    """Tray icon + volume pop-up on this (the hotkey) thread; None if both are
+    turned off or the windows can't be made (the knob works without them)."""
+    if not (settings["osd"] or settings["tray_icon"]):
+        return None
+    import os
+
+    def pause(on):
+        (hotkeys.pause if on else hotkeys.resume)()
+
+    try:
+        from .ui import Ui
+        ui = Ui(settings, on_quit=lambda: kernel32.SetEvent(stop), on_pause=pause,
+                on_key=ctl.press,
+                log_path=os.path.join(config.log_dir(), config.LOG_NAME),
+                settings_path=os.path.join(config.data_dir(), config.SETTINGS_NAME))
+        ui.create()
+    except Exception as e:
+        log.error("tray icon / volume pop-up not available (%s); the knob still works", e)
+        return None
+    return ui
 
 
 def _print(text):

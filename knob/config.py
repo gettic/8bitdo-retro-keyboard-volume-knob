@@ -7,7 +7,7 @@ SETTINGS_NAME = "settings.json"
 LOG_NAME = "volume_knob.log"
 
 DEFAULTS = {
-    "step": 0.015,            # one knob click = 1.5 % (0-100 % in about 2 turns)
+    "step": 0.013,            # one knob click = 1.3 % (0-100 % in about 2 full turns, 38 clicks per turn)
     "apps": ["spotify.exe"],  # Windows apps the knob controls (exe names)
     "peak_threshold": 0.001,  # sound level above this counts as "playing" (~ -60 dBFS)
     "hold_seconds": 1.5,      # an app stays "playing" this long after its last sound
@@ -16,6 +16,9 @@ DEFAULTS = {
     "failsafe": True,         # tab over 100 % at start / when it opens alone -> failsafe_level
     "failsafe_level": 0.5,
     "failsafe_start_window": 20.0,  # seconds after start in which every tab is checked
+    "osd": True,              # volume pop-up on knob turns
+    "osd_seconds": 1.5,       # how long the pop-up stays after the last turn
+    "tray_icon": True,        # knob icon in the notification area (shows the volume)
     "log_level": "INFO",
 }
 
@@ -53,7 +56,7 @@ def validate(raw):
     out = dict(DEFAULTS)
     limits = {"step": (0.01, 0.20), "peak_threshold": (0.00001, 0.5), "hold_seconds": (0.2, 10.0),
               "boost_max": (1.0, 1.5), "failsafe_level": (0.05, 1.0),
-              "failsafe_start_window": (5.0, 120.0)}
+              "failsafe_start_window": (5.0, 120.0), "osd_seconds": (0.5, 10.0)}
     for key, (lo, hi) in limits.items():
         if key in raw:
             out[key], ok = _number(raw[key], DEFAULTS[key], lo, hi)
@@ -65,7 +68,7 @@ def validate(raw):
             out["apps"] = sorted({a.strip().lower() for a in apps})
         else:
             warnings.append("apps: must be a list of exe names, using default")
-    for key in ("brave_fallback", "failsafe"):
+    for key in ("brave_fallback", "failsafe", "osd", "tray_icon"):
         if key in raw:
             if isinstance(raw[key], bool):
                 out[key] = raw[key]

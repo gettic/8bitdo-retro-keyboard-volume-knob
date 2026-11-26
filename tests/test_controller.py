@@ -94,7 +94,7 @@ class ControllerTests(unittest.TestCase):
 
     def test_full_range_reaches_exact_ends(self):
         # about 2 knob turns from 0 to 100 %; float steps still end exactly on 0 and 1
-        self.assertEqual(STEP, 0.015)
+        self.assertEqual(STEP, 0.013)
         self.spotify._volume = 0.0
         self.spotify._peak = 0.3
         self.tick()
@@ -102,12 +102,12 @@ class ControllerTests(unittest.TestCase):
         while self.spotify._volume < 1.0 and clicks < 200:
             self.ctl.handle("up")
             clicks += 1
-        self.assertEqual((self.spotify._volume, clicks), (1.0, 67))
+        self.assertEqual((self.spotify._volume, clicks), (1.0, 77))
         clicks = 0
         while self.spotify._volume > 0.0 and clicks < 200:
             self.ctl.handle("down")
             clicks += 1
-        self.assertEqual((self.spotify._volume, clicks), (0.0, 67))
+        self.assertEqual((self.spotify._volume, clicks), (0.0, 77))
 
     def test_brave_fallback_without_extension(self):
         self.brave._peak = 0.5

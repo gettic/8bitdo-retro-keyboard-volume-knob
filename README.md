@@ -11,11 +11,38 @@ The knob changes the volume of the app that is playing:
 
 If nothing is playing, the knob changes all of them. The mute key mutes and unmutes them together.
 
-While the program runs, it takes over the volume keys: Windows' own master volume and the volume pop-up do not react to the knob.
+While the program runs, it takes over the volume keys: Windows' own master volume and the volume pop-up do not react to the knob. The program shows its own [volume card](#volume-card) and a [tray icon](#tray-icon) instead.
+
+## Volume card
+
+When you turn the knob, a small card shows at the bottom of the screen, like the one Windows has. It shows the app's name (Spotify, YouTube or YouTube Music; one block each when the knob changes more than one), the volume in %, and a bar. Above 100 % the bar turns orange, with a mark at 100 %. A muted app shows "Muted".
+
+- It goes away 1.5 seconds after the last turn.
+- It appears on the screen where the mouse is.
+- It never takes focus, and clicks go through it.
+- It follows Windows' dark or light mode.
+- It is not shown over games in exclusive full screen.
+
+You can turn it off or change how long it stays in the [settings](#settings) (`osd`, `osd_seconds`).
+
+## Tray icon
+
+The program puts a knob icon in the notification area by the clock. Its pointer turns with the volume. It is orange when the volume is boosted above 100 %, and grey when muted or paused. Hover over it to see the exact volume, for example `8BitDo Volume Knob - Spotify 45%`.
+
+Right-click the icon for this menu:
+
+| Item | What it does |
+|---|---|
+| Pause / Resume | Pause gives the volume keys back to Windows until you press Resume or the program starts again. |
+| Open log | Opens the log in Notepad. |
+| Open settings | Opens the settings file in Notepad. |
+| Quit | Stops the program. |
+
+On Windows 11, a new icon may first be hidden under the ^ arrow by the clock. Drag it onto the taskbar to keep it in view. You can hide the icon with the `tray_icon` setting.
 
 ## Louder than 100 % on YouTube
 
-YouTube and YouTube Music can go up to 150 %. The knob always stops once on exactly 100 %, then goes on in the same 1.5 % steps (about 2 full turns from 0 to 100 %). Past 100 % the extension boosts the sound itself and limits it so it doesn't distort. Spotify stays at 100 % at most.
+YouTube and YouTube Music can go up to 150 %. The knob always stops once on exactly 100 %, then goes on in the same 1.3 % steps (about 2 full turns from 0 to 100 %). Past 100 % the extension boosts the sound itself and limits it so it doesn't distort. Spotify stays at 100 % at most.
 
 Things to know:
 
@@ -99,6 +126,8 @@ Nothing leaves your PC. The program and the extension send nothing over the inte
 2. In its `8BitDo Volume Knob` folder, run `py -I volume_knob.py --install` again (one admin box).
 3. In `brave://extensions`, press the reload arrow on the extension.
 
+Updating keeps the `step` already in your settings file. To use the new default, set `"step": 0.013` (Open settings in the tray menu) and restart the knob.
+
 ## Uninstall
 
 1. In a terminal, run:
@@ -116,7 +145,7 @@ The program creates `%APPDATA%\8BitDo Volume Knob\settings.json` the first time 
 
 | Setting | Default | What it does |
 |---|---|---|
-| `step` | 0.015 | Size of one click: 0.015 is 1.5 %. Range 0.01 to 0.20. |
+| `step` | 0.013 | Size of one click: 0.013 is 1.3 %. Range 0.01 to 0.20. |
 | `apps` | `["spotify.exe"]` | Windows apps the knob controls, by exe name. |
 | `boost_max` | 1.5 | Highest YouTube volume (150 %). 1.0 turns the boost off. |
 | `failsafe` | true | The safety reset above. |
@@ -125,6 +154,9 @@ The program creates `%APPDATA%\8BitDo Volume Knob\settings.json` the first time 
 | `brave_fallback` | true | Without the extension, the knob changes Brave's whole sound. |
 | `peak_threshold` | 0.001 | How loud counts as "playing". |
 | `hold_seconds` | 1.5 | How long an app counts as playing after its last sound. |
+| `osd` | true | Show the [volume card](#volume-card) when you turn the knob. |
+| `osd_seconds` | 1.5 | How long the card stays after the last turn. Range 0.5 to 10. |
+| `tray_icon` | true | Show the [tray icon](#tray-icon). |
 | `log_level` | INFO | `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
 
 A bad value is ignored and the default is used instead.
@@ -169,7 +201,7 @@ python -E -s -m unittest setup_knob.test_setup
 Build the release zip (no packages needed):
 
 ```
-python -I make_release.py --version 1.1.0
+python -I make_release.py --version 1.2.0
 ```
 
 ## License

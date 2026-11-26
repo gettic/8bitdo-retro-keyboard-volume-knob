@@ -184,6 +184,36 @@ def _check_hotkeys(rep):
         rep.add("volume keys", False, f"error {err}")
 
 
+def _check_display(rep):
+    """Tray icon + pop-up: windows created hidden and destroyed, the tray call
+    faked (no icon appears), the pop-up and icons drawn in memory only."""
+    from . import display, osd, ui
+
+    def run():
+        calls = []
+        u = ui.Ui(dict(config.DEFAULTS), on_quit=lambda: None, notify=lambda m, d: calls.append(m) or True,
+                  opener=lambda p: None, dpi_aware=False)
+        u.create()
+        try:
+            shown = []
+            u.osd._present = lambda *a: shown.append(a)
+            hidden = not ui.user32.IsWindowVisible(u.hwnd) and not ui.user32.IsWindowVisible(u.osd.hwnd)
+            row = display.Row("Spotify", 0.45, False, 1.0)
+            w, h, data = osd.render([row], 1.0, False)
+            icon = ui.make_hicon(24, ui.icon_pixels(24, 45))
+            ui.user32.DestroyIcon(icon)
+            return hidden, calls[:1] == [ui.NIM_ADD], len(data) == w * h * 4 and data[3] == 0
+        finally:
+            u.close()
+    res, err = _in_thread(run)
+    if err:
+        rep.add("tray icon + pop-up (hidden)", False, repr(err))
+        return
+    hidden, tray, drawn = res
+    rep.add("tray icon + pop-up (hidden)", hidden and tray and drawn,
+            f"windows hidden={hidden} tray={tray} drawn={drawn}")
+
+
 def self_test(out_path=None):
     """Health check. Changes no volume, presses no keys, opens no window.
     Returns 0 when healthy."""
@@ -193,6 +223,7 @@ def self_test(out_path=None):
     _check_settings(rep)
     _check_audio(rep)
     _check_link(rep)
+    _check_display(rep)
     _check_hotkeys(rep)
     return rep.finish()
 
