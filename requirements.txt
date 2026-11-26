@@ -1,0 +1,2 @@
+# The program uses only the Python standard library (ctypes). No packages needed.
+# Tests: python -m unittest discover -s tests -t .   (run from this folder)
