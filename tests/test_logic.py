@@ -198,12 +198,19 @@ class ProtocolTests(unittest.TestCase):
                          {"boost", "x"})
         self.assertEqual(protocol.parse_features({"features": "boost"}), frozenset())
 
-    def test_pipe_name_env(self):
-        with mock.patch.dict(os.environ, {"VOLUME_KNOB_PIPE": r"\\.\pipe\x"}):
-            self.assertEqual(protocol.pipe_name(), r"\\.\pipe\x")
+    def test_ports_env(self):
+        with mock.patch.dict(os.environ, {"VOLUME_KNOB_PORT": "38575"}):
+            self.assertEqual(protocol.ports(), [38575])
+        for bad in ("0", "70000", "x", "-1", ""):
+            with mock.patch.dict(os.environ, {"VOLUME_KNOB_PORT": bad}):
+                self.assertEqual(protocol.ports(), [38475, 38476, 38477])
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("VOLUME_KNOB_PIPE", None)
-            self.assertEqual(protocol.pipe_name(), r"\\.\pipe\8bitdo-volume-knob")
+            os.environ.pop("VOLUME_KNOB_PORT", None)
+            self.assertEqual(protocol.ports(), [38475, 38476, 38477])
+
+    def test_extension_origin(self):
+        self.assertEqual(protocol.EXTENSION_ORIGIN,
+                         "chrome-extension://ocheindfkmmnaekoolhggndpapplccpd")
 
 
 if __name__ == "__main__":

@@ -1,2 +1,4 @@
-# The program uses only the Python standard library (ctypes). No packages needed.
+# Needs Python 3 from python.org (tested with 3.13). The program uses only the Python
+# standard library (ctypes, winreg). No packages needed.
 # Tests: python -m unittest discover -s tests -t .   (run from this folder)
+# Release zip: python -I make_release.py --version <version>   (standard library only)

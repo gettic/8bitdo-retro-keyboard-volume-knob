@@ -11,7 +11,7 @@ from version import VERSION
 from . import config, hotkeys, logsetup, protocol
 from .browser import BrowserBridge, BrowserState
 from .controller import Controller
-from .pipe_server import PipeError, PipeServer
+from .ws_server import WsError, WsServer, process_check
 
 MUTEX_NAME = "Local\\8BitDoVolumeKnob.Instance"
 STOP_EVENT_NAME = "Local\\8BitDoVolumeKnob.Stop"
@@ -64,15 +64,20 @@ def run_program():
 
     state = BrowserState()
     bridge = BrowserBridge(state, time.monotonic)
-    server = PipeServer(protocol.pipe_name(), bridge.on_message, bridge.on_connect,
-                        bridge.on_disconnect)
-    bridge.send = server.send
     from .coreaudio import CoreAudio
     ctl = Controller(settings, CoreAudio, bridge)  # also hooks bridge events
+    server = None
     try:
-        server.start()
-    except PipeError as e:
-        log.error("browser pipe not available (error %s); YouTube control is off", e.errno)
+        server = WsServer(protocol.ports(), bridge.on_message, bridge.on_connect,
+                          bridge.on_disconnect, origin=protocol.EXTENSION_ORIGIN,
+                          peer_check=process_check(("brave.exe",)))
+        bridge.send = server.send
+        port = server.start()
+        log.info("browser link on 127.0.0.1:%s", port)
+    except (WsError, OSError) as e:
+        log.error("browser link not available (%s); YouTube control is off, "
+                  "Windows audio still works", e)
+        bridge.send = None
         server = None
 
     worker = threading.Thread(target=ctl.run, name="audio", daemon=True)

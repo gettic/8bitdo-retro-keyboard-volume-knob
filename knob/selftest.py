@@ -7,7 +7,6 @@ import shutil
 import tempfile
 import threading
 import time
-import uuid
 
 from version import VERSION
 
@@ -102,13 +101,14 @@ def _check_audio(rep):
                 f"{master is not None}")
 
 
-def _check_pipe(rep):
+def _check_link(rep):
+    """WebSocket round trip on a random free port (never the program's own ports).
+    The peer check is the real one, allowing only our own exe name."""
     from .browser import BrowserBridge, BrowserState
-    from .pipe_server import PipeClient, PipeServer
-    name = r"\\.\pipe\8bitdo-volume-knob-selftest-" + uuid.uuid4().hex
     from .controller import Controller
+    from .ws_server import WsClient, WsServer, process_check, process_info
 
-    class _NoAudio:  # the pipe check never touches real audio
+    class _NoAudio:  # the link check never touches real audio
         def sessions(self, apps=None):
             return []
 
@@ -117,15 +117,20 @@ def _check_pipe(rep):
 
     state = BrowserState()
     bridge = BrowserBridge(state, time.monotonic)
-    server = PipeServer(name, bridge.on_message, bridge.on_connect, bridge.on_disconnect)
-    bridge.send = server.send
     ctl = Controller(dict(config.DEFAULTS), _NoAudio, bridge, process_lister=lambda n: set())
     worker = threading.Thread(target=ctl.run, daemon=True)
     worker.start()
     client = None
+    server = None
     try:
-        server.start()
-        client = PipeClient(name)
+        own_exe = process_info(os.getpid())[0] or "?"
+        server = WsServer([0], bridge.on_message, bridge.on_connect, bridge.on_disconnect,
+                          origin=protocol.EXTENSION_ORIGIN, peer_check=process_check([own_exe]))
+        bridge.send = server.send
+        port = server.start()
+        client = WsClient(port)
+        if not client.ok:
+            raise OSError(f"handshake refused (status {client.status})")
         client.send({"type": "hello", "protocol": protocol.PROTOCOL, "host_version": "selftest",
                      "features": list(protocol.FEATURES)})
         reply = client.read()
@@ -140,17 +145,19 @@ def _check_pipe(rep):
         ok_state = len(state.tabs(time.monotonic())) == 1
         ctl.press("up")
         got = client.read()
-        ok_cmd = bool(got) and got == protocol.volume(0.04, tabs=[1], max_volume=1.5)
-        rep.add("browser pipe", ok_hello and ok_state and ok_fail and ok_cmd,
+        ok_cmd = bool(got) and got == protocol.volume(config.DEFAULTS["step"], tabs=[1],
+                                                       max_volume=1.5)
+        rep.add("browser link", ok_hello and ok_state and ok_fail and ok_cmd,
                 f"hello={ok_hello} state={ok_state} failsafe={ok_fail} knob={ok_cmd}")
     except OSError as e:
-        rep.add("browser pipe", False, repr(e))
+        rep.add("browser link", False, repr(e))
     finally:
         if client:
             client.close()
         ctl.stop()
         worker.join(3)
-        server.close()
+        if server:
+            server.close()
 
 
 def _check_hotkeys(rep):
@@ -185,7 +192,7 @@ def self_test(out_path=None):
     rep.add("version", bool(re.fullmatch(r"\d+\.\d+\.\d+", VERSION)), VERSION)
     _check_settings(rep)
     _check_audio(rep)
-    _check_pipe(rep)
+    _check_link(rep)
     _check_hotkeys(rep)
     return rep.finish()
 
@@ -235,7 +242,9 @@ def dev_test(out_path=None):
             rep.info(f"no sessions of {', '.join(sorted(apps))} open")
 
     def keys():
-        from .pipe_server import CreateEventW, SetEvent, CloseHandle
+        from .app import kernel32
+        CreateEventW, SetEvent, CloseHandle = (kernel32.CreateEventW, kernel32.SetEvent,
+                                               kernel32.CloseHandle)
         ok, err = hotkeys.register()
         if not ok:
             return None, err

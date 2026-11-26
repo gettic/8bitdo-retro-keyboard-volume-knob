@@ -1,4 +1,4 @@
-"""In-memory stand-ins for Core Audio, the clock and the pipe."""
+"""In-memory stand-ins for Core Audio, the clock and the browser link."""
 from knob import config
 from knob.browser import BrowserBridge, BrowserState
 

@@ -1,16 +1,25 @@
-// Service worker: keeps a list of YouTube / YouTube Music tabs and connects to
-// the native-messaging host only while at least one such tab is open.
-// The host forwards everything to and from the volume knob program (see PROTOCOL.md).
+// Service worker: keeps a list of YouTube / YouTube Music tabs and, only while
+// at least one such tab is open, keeps a WebSocket to the volume knob program
+// on 127.0.0.1 (see PROTOCOL.md). No other network use.
 "use strict";
 
-const HOST_NAME = "com.gettic.volume_knob";
+// The program listens on the first free one of these ports, on 127.0.0.1 only.
+const PORTS = [38475, 38476, 38477];
+const WS_PATH = "/volume-knob/2";
+const PROTOCOL = 2;
+const HEARTBEAT_MS = 2000;
+const RETRY_MS = [2000, 5000, 10000, 30000]; // after all ports failed
 const SITES = new Set(["youtube", "ytmusic"]);
 const BOOST = new Set(["off", "on", "blocked", "unavailable", "error"]);
 const FEATURES = ["boost", "set_volume"];
 
 const tabs = new Map(); // tabId -> { port, state: {site, playing, volume, muted} | null }
-let native = null;
+let native = null;      // open WebSocket whose hello answer was right
+let socket = null;      // WebSocket being opened or open
+let portIndex = 0;
+let failRound = 0;
 let nativeRetryTimer = 0;
+let heartbeatTimer = 0;
 let lastFailLogged = 0;
 let sendTimer = 0;
 
@@ -22,14 +31,16 @@ function tabList() {
   return list;
 }
 
-function sendState() {
-  sendTimer = 0;
+function post(msg) {
   if (!native) return;
   try {
-    native.postMessage({ type: "state", tabs: tabList() });
-  } catch (e) {
-    native = null;
-  }
+    native.send(JSON.stringify(msg));
+  } catch (e) { /* onclose handles it */ }
+}
+
+function sendState() {
+  sendTimer = 0;
+  post({ type: "state", tabs: tabList() });
 }
 
 function scheduleState() {
@@ -38,41 +49,87 @@ function scheduleState() {
 
 function connectNative() {
   nativeRetryTimer = 0;
-  if (native || tabs.size === 0) return;
-  let port;
+  if (socket || tabs.size === 0) return;
+  let ws;
   try {
-    port = chrome.runtime.connectNative(HOST_NAME);
+    ws = new WebSocket("ws://127.0.0.1:" + PORTS[portIndex] + WS_PATH);
   } catch (e) {
-    retryNative();
+    nextPort();
     return;
   }
-  native = port;
-  port.onMessage.addListener(onHostMessage);
-  port.onDisconnect.addListener(() => {
-    const err = chrome.runtime.lastError;
-    if (native === port) native = null;
-    if (err && Date.now() - lastFailLogged > 600000) {
-      lastFailLogged = Date.now();
-      console.info("Volume knob host not available:", err.message);
+  socket = ws;
+  ws.onopen = () => {
+    if (socket !== ws) return;
+    setTimeout(() => {
+      if (socket === ws && native !== ws) { try { ws.close(); } catch (e) { /* ignore */ } }
+    }, 3000);
+    // The program answers our hello with its own; only then it gets state.
+    try {
+      ws.send(JSON.stringify({ type: "hello", protocol: PROTOCOL,
+                               host_version: chrome.runtime.getManifest().version,
+                               features: FEATURES }));
+    } catch (e) { /* onclose handles it */ }
+  };
+  ws.onmessage = (ev) => {
+    if (socket !== ws || typeof ev.data !== "string" || ev.data.length > 65536) return;
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (!msg || typeof msg !== "object") return;
+    if (native !== ws) {
+      if (msg.type === "hello" && msg.protocol === PROTOCOL) {
+        native = ws;
+        failRound = 0;
+        sendState();
+        heartbeatTimer = setInterval(sendState, HEARTBEAT_MS);
+      } else {
+        try { ws.close(); } catch (e) { /* ignore */ }
+      }
+      return;
     }
-    retryNative();
-  });
-  try {
-    port.postMessage({ type: "hello", ext: chrome.runtime.getManifest().version, features: FEATURES });
-  } catch (e) { /* onDisconnect handles it */ }
-  sendState();
+    onHostMessage(msg);
+  };
+  ws.onclose = () => {
+    if (socket !== ws) return;
+    const wasUp = native === ws;
+    socket = null;
+    native = null;
+    if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = 0; }
+    if (wasUp) {
+      retryNative(RETRY_MS[0]); // same port first
+    } else {
+      nextPort();
+    }
+  };
 }
 
-function retryNative() {
+function nextPort() {
+  portIndex = (portIndex + 1) % PORTS.length;
+  if (portIndex !== 0) {
+    retryNative(1000);
+    return;
+  }
+  if (Date.now() - lastFailLogged > 600000) {
+    lastFailLogged = Date.now();
+    console.info("Volume knob program not reachable on 127.0.0.1");
+  }
+  retryNative(RETRY_MS[Math.min(failRound, RETRY_MS.length - 1)]);
+  failRound += 1;
+}
+
+function retryNative(wait) {
   if (nativeRetryTimer || tabs.size === 0) return;
-  nativeRetryTimer = setTimeout(connectNative, 60000);
+  nativeRetryTimer = setTimeout(connectNative, wait);
 }
 
 function disconnectNative() {
   if (nativeRetryTimer) { clearTimeout(nativeRetryTimer); nativeRetryTimer = 0; }
-  if (native) {
-    try { native.disconnect(); } catch (e) { /* ignore */ }
-    native = null;
+  if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = 0; }
+  const ws = socket;
+  socket = null;
+  native = null;
+  failRound = 0;
+  if (ws) {
+    try { ws.close(1000); } catch (e) { /* ignore */ }
   }
 }
 
@@ -152,12 +209,10 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       scheduleState();
-    } else if (msg.type === "probe" && native) {
+    } else if (msg.type === "probe") {
       // Test diagnostics only: what the page's own controls show.
-      try {
-        native.postMessage({ type: "probe", tab: tabId, ytSlider: msg.ytSlider,
-                             ytmSlider: msg.ytmSlider, saved: msg.saved });
-      } catch (e) { /* ignore */ }
+      post({ type: "probe", tab: tabId, ytSlider: msg.ytSlider,
+             ytmSlider: msg.ytmSlider, saved: msg.saved });
     }
   });
 

@@ -15,7 +15,7 @@ While the program runs, it takes over the volume keys: Windows' own master volum
 
 ## Louder than 100 % on YouTube
 
-YouTube and YouTube Music can go up to 150 %. The knob always stops once on exactly 100 %, then goes on in the same 4 % steps. Past 100 % the extension boosts the sound itself and limits it so it doesn't distort. Spotify stays at 100 % at most.
+YouTube and YouTube Music can go up to 150 %. The knob always stops once on exactly 100 %, then goes on in the same 1.5 % steps (about 2 full turns from 0 to 100 %). Past 100 % the extension boosts the sound itself and limits it so it doesn't distort. Spotify stays at 100 % at most.
 
 Things to know:
 
@@ -34,60 +34,89 @@ This keeps a boosted tab from blasting you when you start listening. Tabs at 100
 
 ## Install
 
-You need Windows and the Brave browser (for YouTube). No admin rights are needed.
+You need:
 
-1. Download `8bitdo-volume-knob-<version>.zip` from the [Releases page](https://github.com/gettic/8bitdo-retro-keyboard-volume-knob/releases).
-2. Unzip the whole `8BitDo Volume Knob` folder somewhere permanent, for example `%LOCALAPPDATA%\Programs`. Don't run it from inside the zip.
-3. Double-click `Install.cmd`. It sets everything up, starts the program, and makes it start with Windows.
-4. Load the extension once. The setup window tells you the folder (`%LOCALAPPDATA%\8BitDo Volume Knob\extension`):
-   1. Open `brave://extensions`.
+- Windows and the Brave browser (Brave only for YouTube).
+- Python 3 from [python.org](https://www.python.org/downloads/windows/) (tested with 3.13). No extra packages. The Python from the Microsoft Store does not work.
+
+The commands below use `py`, the Python launcher that comes with python.org Python. If Python is on your PATH, `python` works too.
+
+Steps:
+
+1. Download `8bitdo-volume-knob-<version>.zip` from the [Releases page](https://github.com/gettic/8bitdo-retro-keyboard-volume-knob/releases) and unzip it.
+2. Open the `8BitDo Volume Knob` folder from the zip. Right-click an empty spot and choose **Open in Terminal**.
+3. Run:
+
+   ```
+   py -I volume_knob.py --install
+   ```
+
+   Windows asks once for admin rights. The box names Python (Python Software Foundation). Say yes.
+4. Load the extension once:
+   1. Open `brave://extensions` in Brave.
    2. Turn on **Developer mode**.
-   3. Click **Load unpacked** and pick that `extension` folder.
+   3. Click **Load unpacked** and pick `C:\Program Files\8BitDo Volume Knob\extension`.
 5. Reload any YouTube or YouTube Music tabs that were already open.
 
-Spotify works right after step 3. Steps 4 and 5 are only for YouTube.
+Step 3 copies the program to `C:\Program Files\8BitDo Volume Knob`, starts it, and makes it start with Windows. Spotify works right away. Steps 4 and 5 are only for YouTube. After that you can delete the downloaded folder.
 
-The program file is not signed, so Windows (SmartScreen) or your antivirus may warn you the first time. Download it only from the Releases page above.
+If you upgrade Python later and it moves to a new folder, run step 3 again.
+
+Coming from version 1.0 (the `.exe` version)? First run `Uninstall.cmd` in your old `8BitDo Volume Knob` folder, remove the old extension in `brave://extensions`, then install this version.
+
+### Start with Windows
+
+By default, install puts a shortcut `8BitDo Volume Knob` in your Startup folder. To use a registry startup entry instead, add `--run-value`:
+
+```
+py -I volume_knob.py --install --run-value
+```
 
 ### What the extension does
 
-It runs only on youtube.com and music.youtube.com. Its only permission is to talk to the program on your PC. It sends no data anywhere else, and never page titles or addresses.
+It runs only on youtube.com and music.youtube.com. It asks for no browser permissions. It talks only to the program on your PC and never sends page titles or addresses.
 
-### What Install.cmd changes
+### How the extension reaches the program
 
-Everything is in your own Windows user account. No admin rights are needed.
+The program listens on your own PC only (`127.0.0.1`, port 38475; if that is taken, 38476 or 38477). Nothing from outside can reach it. It accepts only this extension, running in Brave under your own Windows user. If all three ports are taken, the knob still works, but on YouTube it changes Brave's whole sound.
 
-- The Windows startup entry `8BitDo Volume Knob` (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
-- The registry key `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.gettic.volume_knob` (Brave reads this one).
-- The registry key `HKCU\Software\BraveSoftware\Brave-Browser\NativeMessagingHosts\com.gettic.volume_knob`.
-- The folder `%LOCALAPPDATA%\8BitDo Volume Knob`: the connection file, a copy of the extension, and the logs.
+### What install changes
+
+- The folder `C:\Program Files\8BitDo Volume Knob`: the program and the extension. This is the only part that needs admin rights.
+- The shortcut `8BitDo Volume Knob` in your Startup folder. With `--run-value`: the startup entry `8BitDo Volume Knob` in `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` instead.
+- The log folder `%LOCALAPPDATA%\8BitDo Volume Knob`.
 - The settings folder `%APPDATA%\8BitDo Volume Knob`.
 
-Uninstall removes all of it.
+It also removes the browser registry keys that version 1.0 made. Uninstall removes all of it.
 
 ## Privacy
 
-The program and the extension send nothing over the internet. The extension talks only to the program on your PC, through a local connection that only your Windows user can open. It never reads page titles or addresses.
+Nothing leaves your PC. The program and the extension send nothing over the internet. The extension tells the program only each tab's volume, mute and whether it is playing. It never sends page titles or addresses.
 
 ## Update
 
-1. Close Brave. (It keeps the program file in use.)
-2. Unzip the new version over the old folder.
-3. Run `Install.cmd` again.
+1. Download and unzip the new version.
+2. In its `8BitDo Volume Knob` folder, run `py -I volume_knob.py --install` again (one admin box).
+3. In `brave://extensions`, press the reload arrow on the extension.
 
 ## Uninstall
 
-1. Double-click `Uninstall.cmd`. It stops the program, removes it from Windows startup, and moves its settings and log folders to the Recycle Bin.
+1. In a terminal, run:
+
+   ```
+   py -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py" --uninstall
+   ```
+
+   Windows asks once for admin rights. It stops the program, removes it from Windows startup, and moves the program, settings and log folders to the Recycle Bin.
 2. Remove the extension in `brave://extensions`.
-3. Delete the program folder.
 
 ## Settings
 
-The program creates `%APPDATA%\8BitDo Volume Knob\settings.json` the first time it starts. Edit it with Notepad, then restart the program (run `volume_knob.exe --stop`, then start it again, or sign out and in).
+The program creates `%APPDATA%\8BitDo Volume Knob\settings.json` the first time it starts. Edit it with Notepad, then restart the program: sign out of Windows and back in, or use `--stop` (see [Troubleshooting](#troubleshooting)) and then run `pyw -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py"` (`pyw` starts it without a window).
 
 | Setting | Default | What it does |
 |---|---|---|
-| `step` | 0.04 | Size of one click: 0.04 is 4 %. Range 0.01 to 0.20. |
+| `step` | 0.015 | Size of one click: 0.015 is 1.5 %. Range 0.01 to 0.20. |
 | `apps` | `["spotify.exe"]` | Windows apps the knob controls, by exe name. |
 | `boost_max` | 1.5 | Highest YouTube volume (150 %). 1.0 turns the boost off. |
 | `failsafe` | true | The safety reset above. |
@@ -102,43 +131,45 @@ A bad value is ignored and the default is used instead.
 
 ## Troubleshooting
 
-The program writes `volume_knob.log` to `%LOCALAPPDATA%\8BitDo Volume Knob`. The link between Brave and the program writes `native_host.log` in the same folder.
+The program writes `volume_knob.log` to `%LOCALAPPDATA%\8BitDo Volume Knob`. Everything, including the link to Brave, is in that one log.
 
-Commands for `volume_knob.exe` (run from the program folder in a terminal):
+Commands (run in a terminal, after the program path):
+
+```
+py -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py" --self-test
+```
 
 | Command | What it does |
 |---|---|
 | `--stop` | Stops the running program. |
-| `--self-test` | Checks that everything works, without changing anything. |
+| `--self-test` | Checks that everything works, without changing anything. It includes a "browser link" line. |
 | `--version` | Shows the version. |
 
 ## For developers
 
-The code is Python (standard library only; no packages needed to run it). Run it from the `code` folder.
+The code is Python 3 (standard library only, no packages). Run it from the `code` folder, for example `python volume_knob.py --self-test`.
 
 | Path | What it is |
 |---|---|
 | `volume_knob.py` | Entry point |
-| `knob\` | The program: hotkeys, Windows audio, rules, safety reset |
-| `native_host\` | The bridge Brave starts to talk to the program |
+| `knob\` | The program: hotkeys, Windows audio, rules, safety reset, local link to Brave |
 | `extension\` | The Brave extension |
 | `setup_knob\` | `--install` and `--uninstall` |
-| `build.py` | Builds the release zip into `dist\` |
-| `PROTOCOL.md` | How the program and the bridge talk |
+| `PROTOCOL.md` | How the program and the extension talk |
+| `make_release.py` | Builds the release zip into `dist\` |
 | `tests\` | Tests |
 
 Run the tests from `code\`:
 
 ```
 python -m unittest discover -s tests -t .
-python -m unittest native_host.test_host
-python -m unittest setup_knob.test_setup
+python -E -s -m unittest setup_knob.test_setup
 ```
 
-Build the zip (needs the build environment in `build\venv`):
+Build the release zip (no packages needed):
 
 ```
-python -I build.py --version 1.0.0
+python -I make_release.py --version 1.1.0
 ```
 
 ## License

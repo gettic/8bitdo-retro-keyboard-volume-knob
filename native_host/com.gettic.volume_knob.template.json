@@ -1,9 +1,0 @@
-{
-  "name": "com.gettic.volume_knob",
-  "description": "8BitDo Retro Keyboard volume knob: bridge between the Brave extension and the program",
-  "path": "<FULL PATH TO THE PROGRAM .EXE, OR TO native_host\\run_host.cmd WHEN RUN FROM SOURCE>",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://ocheindfkmmnaekoolhggndpapplccpd/"
-  ]
-}

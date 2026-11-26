@@ -1,19 +1,26 @@
-# Pipe protocol (program <-> native-messaging host)
+# Browser protocol (program <-> Brave extension)
 
 Protocol version: **2** (v1 never shipped; the program only accepts 2)
 
-## The pipe
+Below, "host" means the extension's background service worker (it used to be a native-messaging host; that is gone).
 
-- Name: `\\.\pipe\8bitdo-volume-knob`. If the environment variable `VOLUME_KNOB_PIPE` is set, both sides use its value as the full pipe name instead (tests use this, e.g. `\\.\pipe\8bitdo-volume-knob-test-<random>`).
-- The **program** owns the pipe (server). The **host** is the client (`CreateFile` on the name, read/write).
-- The server creates it with `FILE_FLAG_FIRST_PIPE_INSTANCE` (if another process already owns the name, the program refuses to start the pipe), `PIPE_REJECT_REMOTE_CLIENTS`, byte mode, overlapped I/O, and a DACL that allows only the current user (`D:P(A;;GA;;;<current user SID>)`).
-- Up to 4 hosts can be connected at the same time (for example one per Brave profile).
-- If the pipe does not exist (program not running) or the connection drops, the host keeps working on its own and **retries connecting within 2 s** (the program's start-up failsafe waits 20 s for hosts).
+## Transport
+
+- A **WebSocket on the loopback address only**: `ws://127.0.0.1:<port>/volume-knob/2`. The **program** is the server, the **extension** is the client.
+- Ports, tried in this order: **38475, 38476, 38477** (the program binds the first free one with `SO_EXCLUSIVEADDRUSE`; the extension tries them in the same order). If the environment variable `VOLUME_KNOB_PORT` is set to a port number, the program uses only that port (tests use this, e.g. 38575). If all ports are taken, the program logs it once and keeps working with Windows audio only (YouTube falls back to Brave's own session, `brave_fallback`).
+- The program accepts a connection only when **all** of these hold, else it closes it (HTTP 403 where a request was read):
+  - the connecting process (looked up in the TCP table) is `brave.exe` running as the **same Windows user** as the program;
+  - the request is `GET /volume-knob/2 HTTP/1.1`, with `Host: 127.0.0.1:<port>` exactly, `Origin: chrome-extension://ocheindfkmmnaekoolhggndpapplccpd` exactly (the extension ID fixed by the manifest `key`), `Upgrade: websocket`, `Connection: Upgrade`, `Sec-WebSocket-Version: 13`, a valid `Sec-WebSocket-Key`, and no header twice;
+  - the request head is at most 8 KB and complete within 2 s;
+  - fewer than 4 clients are connected (up to 4 at a time, for example one per Brave profile).
+- No WebSocket extensions or subprotocols are accepted (`permessage-deflate` is ignored, so frames are never compressed).
+- If the program is not running or the connection drops, the extension keeps working on its own and **retries connecting within 2 s** (the program's start-up failsafe waits 20 s for hosts).
 
 ## Framing
 
-- UTF-8 JSON objects, one per line, each line ends with `\n`. No line may be longer than 64 KB.
-- Both sides **ignore unknown message types and unknown fields**. Bad JSON lines are ignored; the program drops a client after 3 bad lines in a row.
+- Each message is **one WebSocket text frame** holding one UTF-8 JSON object (no trailing newline needed). At most 64 KB.
+- Client frames must be masked, unfragmented (FIN set), with the reserved bits 0. Binary frames, fragments, unmasked frames or bigger messages close the connection. Pings are answered with pongs; a close frame is answered and the connection ends. Server frames are unmasked text frames.
+- Both sides **ignore unknown message types and unknown fields**. Bad JSON messages are ignored; the program drops a client after 3 bad messages in a row.
 - Tab titles, URLs or anything else about what the user watches are never sent.
 
 ## Handshake

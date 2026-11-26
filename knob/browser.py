@@ -57,7 +57,7 @@ class BrowserState:
 class BrowserBridge:
     """Handles messages from hosts and sends commands back.
 
-    `send(client, msg_dict)` is supplied by the pipe server. `events(tuple)`,
+    `send(client, msg_dict)` is supplied by the WebSocket server. `events(tuple)`,
     if set, gets ("tabs", client, tabs) and ("gone", client) for the
     controller thread (failsafe)."""
 

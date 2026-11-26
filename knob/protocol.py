@@ -1,4 +1,4 @@
-"""Pipe protocol v2 (see PROTOCOL.md): parse and build messages."""
+"""Browser protocol v2 (see PROTOCOL.md): parse and build messages."""
 import json
 import os
 
@@ -6,15 +6,20 @@ from version import VERSION
 
 PROTOCOL = 2
 FEATURES = ("boost", "set_volume")
-DEFAULT_PIPE = r"\\.\pipe\8bitdo-volume-knob"
+DEFAULT_PORTS = (38475, 38476, 38477)
+EXTENSION_ORIGIN = "chrome-extension://ocheindfkmmnaekoolhggndpapplccpd"
 MAX_LINE = 64 * 1024
 SITES = ("youtube", "ytmusic")
 BOOST_STATES = ("off", "on", "blocked", "unavailable", "error")
 HARD_MAX = 1.5
 
 
-def pipe_name():
-    return os.environ.get("VOLUME_KNOB_PIPE") or DEFAULT_PIPE
+def ports():
+    """Ports to try in order. VOLUME_KNOB_PORT (1-65535) replaces the list (tests)."""
+    v = os.environ.get("VOLUME_KNOB_PORT", "").strip()
+    if v.isdigit() and 0 < int(v) < 65536:
+        return [int(v)]
+    return list(DEFAULT_PORTS)
 
 
 def decode(line):

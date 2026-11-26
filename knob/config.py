@@ -7,7 +7,7 @@ SETTINGS_NAME = "settings.json"
 LOG_NAME = "volume_knob.log"
 
 DEFAULTS = {
-    "step": 0.04,             # one knob click = 4 %
+    "step": 0.015,            # one knob click = 1.5 % (0-100 % in about 2 turns)
     "apps": ["spotify.exe"],  # Windows apps the knob controls (exe names)
     "peak_threshold": 0.001,  # sound level above this counts as "playing" (~ -60 dBFS)
     "hold_seconds": 1.5,      # an app stays "playing" this long after its last sound

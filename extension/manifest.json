@@ -2,11 +2,10 @@
   "manifest_version": 3,
   "name": "8BitDo Retro Keyboard volume knob",
   "short_name": "Volume knob",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Lets the 8BitDo Retro Keyboard volume knob program change the volume of YouTube and YouTube Music tabs.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwPagGwDbljoqx4+9rT5ONVSR0Me0i3bRWW6ag2knlKdHvq7gtc6K2zGM+9+YXWhWPtN5LViqbb73iVCNbSJ3DY5wY79QPvKERy7IcJYHScJEHx3Qr40RuxUdtIKltefcSxMp2ACZITRqUUhxEnQc8MvJqeona83DWqCR/2eMU5IpaNhMbt4SdkRBLllDMfWMqI+djCxybl2BgIkbhINylkBy9E/wo3DZSQhiP1EWBH0Cz0MWIo7RsU38hj5Xc5jjZF67TcsPtj96EGry7CNxC7GS9XG0uwvjVwBQGN38yPUeYzo7JHUSyzi/jHRtL2uyJPyubK7PJI/zvFqfu6ZMFQIDAQAB",
-  "minimum_chrome_version": "111",
-  "permissions": ["nativeMessaging"],
+  "minimum_chrome_version": "116",
   "background": {
     "service_worker": "background.js"
   },

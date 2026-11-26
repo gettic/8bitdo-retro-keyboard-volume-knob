@@ -1,4 +1,4 @@
-"""Controller + browser bridge with fake Core Audio, fake clock and fake pipe."""
+"""Controller + browser bridge with fake Core Audio, fake clock and fake browser link."""
 import threading
 import unittest
 
@@ -7,6 +7,8 @@ from knob.controller import Controller
 
 from tests.fakes import (FakeAudio, FakeClock, FakeSession, ProcessList, connect_host,
                          make_bridge, settings)
+
+STEP = settings()["step"]  # one knob click (default setting)
 
 
 def yt(tid, playing=False, muted=False, site="youtube"):
@@ -32,7 +34,7 @@ class ControllerTests(unittest.TestCase):
         self.spotify._peak = 0.3
         self.tick()
         self.ctl.handle("up")
-        self.assertAlmostEqual(self.spotify._volume, 0.54)
+        self.assertAlmostEqual(self.spotify._volume, 0.5 + STEP)
         self.assertEqual([m["type"] for _, m in self.rec.sent], ["hello"])
         self.assertEqual(self.brave._volume, 0.8)
 
@@ -42,15 +44,15 @@ class ControllerTests(unittest.TestCase):
         self.ctl.handle("down")
         self.assertEqual(self.spotify._volume, 0.5)
         self.assertEqual(self.rec.sent[-1],
-                         (1, {"type": "volume", "delta": -0.04, "max": 1.5, "tabs": [7]}))
+                         (1, {"type": "volume", "delta": -STEP, "max": 1.5, "tabs": [7]}))
         self.assertEqual(self.brave._volume, 0.8)  # extension connected: Brave untouched
 
     def test_nothing_playing_changes_both(self):
         connect_host(self.bridge, 1, [yt(7), yt(9, site="ytmusic")])
         self.tick()
         self.ctl.handle("up")
-        self.assertAlmostEqual(self.spotify._volume, 0.54)
-        self.assertEqual(self.rec.sent[-1], (1, {"type": "volume", "delta": 0.04, "max": 1.5, "tabs": [7, 9]}))
+        self.assertAlmostEqual(self.spotify._volume, 0.5 + STEP)
+        self.assertEqual(self.rec.sent[-1], (1, {"type": "volume", "delta": STEP, "max": 1.5, "tabs": [7, 9]}))
         self.assertEqual(self.brave._volume, 0.8)
 
     def test_playing_lasts_hold_time(self):
@@ -81,20 +83,37 @@ class ControllerTests(unittest.TestCase):
 
     def test_volume_unmutes_and_clamps(self):
         self.spotify._muted = True
-        self.spotify._volume = 0.98
+        self.spotify._volume = 1.0 - STEP / 2
         self.tick()
         self.ctl.handle("up")
         self.assertFalse(self.spotify._muted)
         self.assertEqual(self.spotify._volume, 1.0)
-        self.spotify._volume = 0.01
+        self.spotify._volume = STEP / 2
         self.ctl.handle("down")
         self.assertEqual(self.spotify._volume, 0.0)
+
+    def test_full_range_reaches_exact_ends(self):
+        # about 2 knob turns from 0 to 100 %; float steps still end exactly on 0 and 1
+        self.assertEqual(STEP, 0.015)
+        self.spotify._volume = 0.0
+        self.spotify._peak = 0.3
+        self.tick()
+        clicks = 0
+        while self.spotify._volume < 1.0 and clicks < 200:
+            self.ctl.handle("up")
+            clicks += 1
+        self.assertEqual((self.spotify._volume, clicks), (1.0, 67))
+        clicks = 0
+        while self.spotify._volume > 0.0 and clicks < 200:
+            self.ctl.handle("down")
+            clicks += 1
+        self.assertEqual((self.spotify._volume, clicks), (0.0, 67))
 
     def test_brave_fallback_without_extension(self):
         self.brave._peak = 0.5
         self.tick()
         self.ctl.handle("down")
-        self.assertAlmostEqual(self.brave._volume, 0.76)
+        self.assertAlmostEqual(self.brave._volume, 0.8 - STEP)
         self.assertEqual(self.spotify._volume, 0.5)  # Brave plays, Spotify does not
 
     def test_brave_fallback_off(self):
@@ -102,7 +121,7 @@ class ControllerTests(unittest.TestCase):
         self.tick()
         self.ctl.handle("up")
         self.assertEqual(self.brave._volume, 0.8)
-        self.assertAlmostEqual(self.spotify._volume, 0.54)
+        self.assertAlmostEqual(self.spotify._volume, 0.5 + STEP)
 
     def test_stale_host_falls_back(self):
         connect_host(self.bridge, 1, [yt(7, playing=True)])
@@ -110,7 +129,7 @@ class ControllerTests(unittest.TestCase):
         self.tick()
         self.ctl.handle("up")
         self.assertEqual(len(self.rec.sent), 1)  # stale tab gets no command
-        self.assertAlmostEqual(self.brave._volume, 0.84)
+        self.assertAlmostEqual(self.brave._volume, 0.8 + STEP)
 
     def test_other_apps_never_touched(self):
         other = FakeSession("game.exe", volume=0.3, peak=0.9)
@@ -137,7 +156,7 @@ class ControllerTests(unittest.TestCase):
         self.ctl.stop()
         t.join(5)
         self.assertFalse(t.is_alive())
-        self.assertAlmostEqual(self.spotify._volume, 0.58)
+        self.assertAlmostEqual(self.spotify._volume, 0.5 + 2 * STEP)
         self.assertTrue(self.audio.closed)
         self.assertTrue(self.spotify.released)
 
@@ -220,8 +239,8 @@ class BoostAndFailsafeTests(unittest.TestCase):
         self.drain()
         self.ctl.handle("up")
         vols = [m for _, m in self.sent("volume")]
-        self.assertEqual(vols, [{"type": "volume", "delta": 0.04, "max": 1.0, "tabs": [8]},
-                                {"type": "volume", "delta": 0.04, "max": 1.5, "tabs": [7, 9]}])
+        self.assertEqual(vols, [{"type": "volume", "delta": STEP, "max": 1.0, "tabs": [8]},
+                                {"type": "volume", "delta": STEP, "max": 1.5, "tabs": [7, 9]}])
 
     def test_host_without_boost_gets_max_1(self):
         connect_host(self.bridge, 1, [boosted(7, 0.9, boost="off")], features=[])

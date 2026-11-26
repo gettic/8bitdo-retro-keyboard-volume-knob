@@ -1,4 +1,4 @@
-"""Start-up code: command line, names, native-host dispatch."""
+"""Start-up code: command line, names, setup dispatch."""
 import io
 import sys
 import types
@@ -35,18 +35,14 @@ class AppTests(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 self.assertFalse(app.request_stop())
 
-    def test_native_host_dispatch(self):
-        fake_pkg = types.ModuleType("native_host")
-        fake_mod = types.ModuleType("native_host.volume_knob_host")
-        calls = []
-        fake_mod.run = lambda argv: calls.append(argv) or 7
-        fake_pkg.volume_knob_host = fake_mod
+    def test_old_native_host_call_is_refused(self):
+        # an old Brave registration starting us as a native host must not start the program
         argv = ["volume_knob.py", "chrome-extension://abc/", "--parent-window=0"]
-        with mock.patch.dict(sys.modules, {"native_host": fake_pkg,
-                                           "native_host.volume_knob_host": fake_mod}), \
-                mock.patch.object(sys, "argv", argv):
-            self.assertEqual(volume_knob.main(), 7)
-        self.assertEqual(calls, [["chrome-extension://abc/", "--parent-window=0"]])
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(app, "run_program") as run, \
+                redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(volume_knob.main(), 2)
+        run.assert_not_called()
 
     def test_setup_dispatch(self):
         fake = types.ModuleType("setup_knob")

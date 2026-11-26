@@ -195,7 +195,8 @@
   function effectivePercent(p) {
     const s = sliderValue(p);
     if (!Number.isFinite(s)) return NaN;
-    return s >= 100 ? Math.round(s * boost.gain) : s;
+    // (rounded to 0.001 first, so 100 x 1.015 counts as 101.5, not 101.4999...)
+    return s >= 100 ? Math.round(Math.round(s * boost.gain * 1000) / 1000) : s;
   }
 
   // ---- state ----------------------------------------------------------------------
@@ -269,9 +270,10 @@
     } catch (e) { /* storage blocked: only this page keeps the volume */ }
   }
 
-  // Set the effective volume (percent, 0-150).
+  // Set the effective volume (percent, 0-150). The slider takes whole percent;
+  // the boost gain keeps the fraction.
   async function setEffective(p, target) {
-    target = Math.round(Math.min(HARD_MAX, Math.max(0, target)));
+    target = Math.min(HARD_MAX, Math.max(0, target));
     if (target <= 100) {
       // Down from a boost: the gain goes first, so it is never loud for a moment.
       if (boost.gain > 1) setBoostGain(1);
@@ -284,6 +286,12 @@
     if (ok) setBoostGain(target / 100);
   }
 
+  // The page shows whole percent, but knob steps can be fractional (1.5 %).
+  // Remember the exact target of the last knob step and count on from it while
+  // the page still shows that target rounded; if the user moved the volume
+  // somewhere else, start again from what the page shows.
+  let exact = null;
+
   // Commands are queued so a fast knob spin is applied in order.
   let chain = Promise.resolve();
   function apply(cmd) {
@@ -294,21 +302,24 @@
     const p = findPlayer();
     if (!p) return;
     if (cmd.type === "volume") {
-      const old = effectivePercent(p);
-      if (!Number.isFinite(old)) return;
+      const shown = effectivePercent(p);
+      if (!Number.isFinite(shown)) return;
+      const old = exact !== null && Math.round(exact) === shown ? exact : shown;
       if (typeof p.isMuted === "function" && p.isMuted()) setMuted(p, false); // a volume change unmutes
       const max = Math.min(HARD_MAX, Math.max(0, Math.round((typeof cmd.max === "number" ? cmd.max : 1) * 100)));
       // Always move at least one step for a non-zero delta.
       let step = cmd.delta * 100;
       if (step > 0 && step < 1) step = 1;
       if (step < 0 && step > -1) step = -1;
-      let target = Math.round(old + step);
+      let target = Math.round((old + step) * 1000) / 1000; // no float drift
       // Crossing 100 % stops exactly on 100 % once (PROTOCOL.md).
       if ((old < 100 && target > 100) || (old > 100 && target < 100)) target = 100;
       target = Math.min(max, Math.max(0, target));
       await setEffective(p, target);
+      exact = target;
       rememberVolume(p);
     } else if (cmd.type === "set_volume") {
+      exact = null;
       // Exact, and mute is left alone (used by the program's failsafe).
       await setEffective(p, cmd.volume * 100);
       rememberVolume(p);
