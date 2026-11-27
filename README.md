@@ -42,7 +42,7 @@ Right-click the icon for this menu. It is dark in Windows dark mode and light in
 | Speaker button (end of that row) | Mutes or unmutes, like the knob's Mute key. When everything is muted it shows a crossed-out speaker with an outline. |
 | Pause / Resume | Pause gives the volume keys back to Windows until you press Resume or the program starts again. |
 | Open log | Opens the log in Notepad. |
-| Open settings | Opens the settings file in Notepad. |
+| Settings | Opens the [settings window](#settings). |
 | Quit | Stops the program. |
 
 On Windows 11, a new icon may first be hidden under the ^ arrow by the clock. Drag it onto the taskbar to keep it in view. You can hide the icon with the `tray_icon` setting.
@@ -160,7 +160,7 @@ Nothing leaves your PC, except talking to Spotify if you did the [Spotify setup]
 2. In its `8BitDo Volume Knob` folder, run `py -I volume_knob.py --install` again (one admin box).
 3. In `brave://extensions`, press the reload arrow on the extension.
 
-Updating keeps the `step` already in your settings file. To use the new default, set `"step": 0.013` (Open settings in the tray menu) and restart the knob.
+Updating keeps the `step` already in your settings. To use the new default, open **Settings** in the tray menu and set "Each knob click changes the volume by" to 1.3 %.
 
 ## Uninstall
 
@@ -175,7 +175,25 @@ Updating keeps the `step` already in your settings file. To use the new default,
 
 ## Settings
 
-The program creates `%APPDATA%\8BitDo Volume Knob\settings.json` the first time it starts. Edit it with Notepad, then restart the program: sign out of Windows and back in, or use `--stop` (see [Troubleshooting](#troubleshooting)) and then run `pyw -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py"` (`pyw` starts it without a window).
+Right-click the tray icon and choose **Settings**. A window opens (dark or light, like Windows). Changes are saved and used at once, with no restart. It sets:
+
+| In the window | Setting |
+|---|---|
+| Each knob click changes the volume by | `step` |
+| Spotify volume: Spotify's own / Windows mixer | `spotify_control` |
+| No Brave extension: change all of Brave's sound | `brave_fallback` |
+| Can go louder than 100 %: No / 125 % / 150 % | `boost_max` |
+| Turn tabs over 100 % down when they open, and to what level | `failsafe`, `failsafe_level` |
+| Show the pop-up, how long it stays, which screen | `osd`, `osd_seconds`, `osd_monitor` |
+| The icon shows: knob and number / knob only | `tray_style` |
+
+Use the mouse, or Tab, arrow keys, Space, Enter and Esc.
+
+The other settings are only in the file `%APPDATA%\8BitDo Volume Knob\settings.json`, which the program creates the first time it starts. Click **Open the settings file (advanced)** at the bottom of the window to open it in Notepad. After editing the file, restart the program: sign out of Windows and back in, or use `--stop` (see [Troubleshooting](#troubleshooting)) and then run `pyw -I "C:\Program Files\8BitDo Volume Knob\volume_knob.py"` (`pyw` starts it without a window).
+
+If the file has a mistake, the window does not change it. It shows a notice with **Open the file** and **Reset to defaults**. Reset keeps the old file as `settings.broken.json` and writes the defaults. Later backups are numbered (`settings.broken-2.json`, `settings.broken-3.json`, ...), so an older backup is never overwritten.
+
+All settings:
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -240,7 +258,7 @@ python -E -s -m unittest setup_knob.test_setup
 Build the release zip (no packages needed):
 
 ```
-python -I make_release.py --version 1.4.0
+python -I make_release.py --version 1.5.0
 ```
 
 ## License

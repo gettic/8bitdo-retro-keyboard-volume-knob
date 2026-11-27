@@ -5,7 +5,7 @@ messages in hotkeys.run_loop.
 Tray icon: a knob in the Brave extension's look whose pointer shows the volume
 (7 o'clock = 0 %, 5 o'clock = 100 %, orange towards 6 o'clock for the boost,
 grey + red slash when muted, grey + pause sign when paused). Right-click menu:
-Pause / Open log / Open settings / Quit."""
+Pause / Open log / Settings (settings_window.py) / Quit."""
 import collections
 import ctypes
 import ctypes.wintypes as wt
@@ -19,6 +19,7 @@ from version import VERSION
 
 from . import display as view
 from . import gdi, menu, osd
+from . import settings_window
 
 log = logging.getLogger("knob.ui")
 
@@ -66,6 +67,7 @@ _d(user32, "DestroyWindow", wt.BOOL, wt.HWND)
 _d(user32, "IsWindowVisible", wt.BOOL, wt.HWND)
 _d(user32, "DefWindowProcW", LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 _d(user32, "PostMessageW", wt.BOOL, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+_d(user32, "SendMessageW", LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 _d(user32, "RegisterWindowMessageW", wt.UINT, wt.LPCWSTR)
 _d(user32, "SetTimer", ctypes.c_size_t, wt.HWND, ctypes.c_size_t, wt.UINT, ctypes.c_void_p)
 _d(user32, "KillTimer", wt.BOOL, wt.HWND, ctypes.c_size_t)
@@ -88,6 +90,7 @@ IDC_ARROW = 32512  # class cursor: without one the cursor over the menu keeps it
 WM_DESTROY, WM_CLOSE, WM_TIMER, WM_HOTKEY = 0x2, 0x10, 0x113, 0x312
 WM_NULL, WM_MOUSEACTIVATE, MA_NOACTIVATE = 0x0, 0x21, 3
 WM_CONTEXTMENU, WM_RBUTTONUP = 0x7B, 0x205
+WM_SETICON = 0x80
 WM_APP = 0x8000
 WM_APP_SHOW, WM_APP_TRAY, WM_APP_CMD = WM_APP + 1, WM_APP + 2, WM_APP + 3
 OSD_TIMER = 1
@@ -421,7 +424,7 @@ def menu_items(paused, keys_ok=True, level=None, muted=False):
     return [(0, head, False), quick_row(level, muted), (None, "", False),
             (CMD_PAUSE, "Resume" if paused else "Pause", True),
             (CMD_LOG, "Open log", True),
-            (CMD_SETTINGS, "Open settings", True),
+            (CMD_SETTINGS, "Settings", True),
             (None, "", False),
             (CMD_QUIT, "Quit", True)]
 
@@ -432,8 +435,12 @@ class Ui:
     from any thread."""
 
     def __init__(self, settings, on_quit, on_pause=None, on_key=None, log_path=None,
-                 settings_path=None, notify=None, opener=None, dpi_aware=True):
+                 settings_path=None, notify=None, opener=None, dpi_aware=True,
+                 on_settings=None):
         self.osd_on = bool(settings.get("osd", True))
+        self.on_settings = on_settings  # changes saved in the settings window -> controller
+        self.settings_win = None
+        self._win_icons = []
         self.tray_on = bool(settings.get("tray_icon", True))
         self.osd_ms = int(float(settings.get("osd_seconds", 1.5)) * 1000)
         self.osd_monitor = settings.get("osd_monitor", "primary")
@@ -492,11 +499,7 @@ class Ui:
                 user32.ChangeWindowMessageFilterEx(self.hwnd, self._taskbar_created,
                                                    MSGFLT_ALLOW, None)
             if self.osd_on:
-                h = user32.CreateWindowExW(osd.EX_STYLE, CLASS_NAME, view.TITLE, osd.WS_POPUP,
-                                           0, 0, 0, 0, None, None, self._hinst, None)
-                if not h:
-                    raise OSError(f"CreateWindowExW (pop-up) failed ({ctypes.get_last_error()})")
-                self.osd = osd.Osd(h, self.osd_monitor)
+                self._make_osd()
             if self.tray_on:
                 h = user32.CreateWindowExW(menu.EX_STYLE, CLASS_NAME, view.TITLE, osd.WS_POPUP,
                                            0, 0, 0, 0, None, None, self._hinst, None)
@@ -512,7 +515,80 @@ class Ui:
             raise
         return self.hwnd
 
+    def _make_osd(self):
+        h = user32.CreateWindowExW(osd.EX_STYLE, CLASS_NAME, view.TITLE, osd.WS_POPUP,
+                                   0, 0, 0, 0, None, None, self._hinst, None)
+        if not h:
+            raise OSError(f"CreateWindowExW (pop-up) failed ({ctypes.get_last_error()})")
+        self.osd = osd.Osd(h, self.osd_monitor)
+
+    def _drop_osd(self):
+        if self.osd:
+            user32.KillTimer(self.hwnd, OSD_TIMER)
+            hwnd, self.osd = self.osd.hwnd, None
+            user32.DestroyWindow(hwnd)
+
+    def _make_settings_win(self):
+        """The settings window, made hidden on first use."""
+        sw = settings_window
+        h = user32.CreateWindowExW(sw.EX_STYLE, CLASS_NAME, sw.TITLE, sw.STYLE,
+                                   0, 0, 0, 0, None, None, self._hinst, None)
+        if not h:
+            raise OSError(f"CreateWindowExW (settings) failed ({ctypes.get_last_error()})")
+        folder = os.path.dirname(self.settings_path) if self.settings_path else None
+        self.settings_win = sw.SettingsWindow(
+            h, folder, self.settings_changed,
+            lambda: self.settings_path and self.opener(self.settings_path))
+        try:  # the knob as the window's icon (title bar, taskbar, Alt+Tab)
+            for kind, size in ((0, 16), (1, 32)):  # ICON_SMALL, ICON_BIG
+                icon = make_hicon(size, icon_pixels(size, None, False, False))
+                self._win_icons.append(icon)
+                user32.SendMessageW(h, WM_SETICON, kind, icon)
+        except OSError:
+            pass
+        return self.settings_win
+
+    def open_settings(self):
+        if not self.settings_path:
+            return
+        win = self.settings_win or self._make_settings_win()
+        win.open()
+
+    def settings_changed(self, changes):
+        """Saved in the settings window (window thread): apply what this
+        window side shows now, pass the rest on (controller)."""
+        if "osd_seconds" in changes:
+            self.osd_ms = int(float(changes["osd_seconds"]) * 1000)
+        if "osd_monitor" in changes:
+            self.osd_monitor = changes["osd_monitor"]
+            if self.osd:
+                self.osd.monitor = self.osd_monitor
+        if "osd" in changes and bool(changes["osd"]) != self.osd_on:
+            self.osd_on = bool(changes["osd"])
+            if self.osd_on and not self.osd:
+                try:
+                    self._make_osd()
+                except OSError as e:
+                    log.error("volume pop-up not available (%s)", e)
+            elif not self.osd_on:
+                self._drop_osd()
+        if "tray_style" in changes and changes["tray_style"] != self.tray_style:
+            self.tray_style = changes["tray_style"]
+            if self.tray:
+                old = self.tray.icons
+                self.tray.icons = IconCache(style=self.tray_style)
+                self.tray.key = None  # redraw with the new style
+                self._update_tray()
+                old.clear()
+        if self.on_settings:
+            self.on_settings(dict(changes))
+
     def close(self):
+        if self.settings_win:
+            hwnd, self.settings_win = self.settings_win.hwnd, None
+            user32.DestroyWindow(hwnd)
+        while self._win_icons:
+            user32.DestroyIcon(self._win_icons.pop())
         if self.tray:
             try:
                 self.tray.remove()
@@ -594,13 +670,15 @@ class Ui:
                 self.on_pause(not self.paused)
         elif cmd == CMD_LOG and self.log_path:
             self.opener(self.log_path)
-        elif cmd == CMD_SETTINGS and self.settings_path:
-            self.opener(self.settings_path)
+        elif cmd == CMD_SETTINGS:
+            self.open_settings()
         elif cmd == CMD_QUIT:
             if self.osd:
                 self.osd.hide()
             if self.menu:
                 self.menu.close()
+            if self.settings_win:
+                self.settings_win.close()
             self.on_quit()
 
     def _choose(self, cmd):
@@ -629,6 +707,10 @@ class Ui:
         try:
             if self.menu and hwnd == self.menu.hwnd:
                 r = self.menu.handle(msg, wparam, lparam)
+                if r is not None:
+                    return r
+            elif self.settings_win and hwnd == self.settings_win.hwnd:
+                r = self.settings_win.handle(msg, wparam, lparam)
                 if r is not None:
                     return r
             elif hwnd == self.hwnd:

@@ -37,6 +37,8 @@ _decl(gdi32, "CreateFontW", wt.HFONT, ctypes.c_int, ctypes.c_int, ctypes.c_int, 
       wt.DWORD, wt.LPCWSTR)
 _decl(gdi32, "GetTextFaceW", ctypes.c_int, wt.HDC, ctypes.c_int, wt.LPWSTR)
 _decl(gdi32, "GdiFlush", wt.BOOL)
+_decl(gdi32, "BitBlt", wt.BOOL, wt.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+      wt.HDC, ctypes.c_int, ctypes.c_int, wt.DWORD)
 _decl(user32, "FillRect", ctypes.c_int, wt.HDC, ctypes.POINTER(wt.RECT), wt.HBRUSH)
 _decl(user32, "DrawTextW", ctypes.c_int, wt.HDC, wt.LPCWSTR, ctypes.c_int,
       ctypes.POINTER(wt.RECT), wt.UINT)
@@ -46,6 +48,8 @@ TRANSPARENT = 1
 WINDING = 2
 DT_LEFT, DT_CENTER, DT_RIGHT = 0x0, 0x1, 0x2
 DT_VCENTER, DT_SINGLELINE, DT_NOPREFIX, DT_END_ELLIPSIS = 0x4, 0x20, 0x800, 0x8000
+DT_CALCRECT = 0x400
+SRCCOPY = 0x00CC0020
 ANTIALIASED_QUALITY = 4  # greyscale: no ClearType colour fringes on a layered window
 
 
@@ -155,6 +159,17 @@ class Bitmap:
         gdi32.SelectObject(self.dc, old)
         gdi32.DeleteObject(font)
 
+    def text_width(self, s, size, face="Segoe UI", weight=400):
+        """Width in px of one line of text drawn by text() with these settings."""
+        font = gdi32.CreateFontW(-int(round(size)), 0, 0, 0, weight, 0, 0, 0, 1, 0, 0,
+                                 ANTIALIASED_QUALITY, 0, face)
+        old = gdi32.SelectObject(self.dc, font)
+        r = wt.RECT(0, 0, 0, 0)
+        user32.DrawTextW(self.dc, s, -1, ctypes.byref(r), DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX)
+        gdi32.SelectObject(self.dc, old)
+        gdi32.DeleteObject(font)
+        return r.right - r.left
+
     def face_exists(self, face):
         font = gdi32.CreateFontW(-12, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, face)
         old = gdi32.SelectObject(self.dc, font)
@@ -170,6 +185,13 @@ class Bitmap:
 
     def write(self, data):
         ctypes.memmove(self.bits, bytes(data), self.w * self.h * 4)
+
+
+def blit(hdc, x, y, w, h, data):
+    """Copy w*h BGRA pixels (opaque) to a window's DC (in WM_PAINT)."""
+    with Bitmap(w, h) as bm:
+        bm.write(data)
+        return bool(gdi32.BitBlt(hdc, x, y, w, h, bm.dc, 0, 0, SRCCOPY))
 
 
 def downsample(raw, n, s):

@@ -107,6 +107,102 @@ def validate(raw):
     return out, warnings
 
 
+BROKEN_NAME = "settings.broken.json"
+
+
+class SettingsFileError(Exception):
+    """The settings file exists but can't be read as settings (hand-edit
+    mistake): the settings window never overwrites it."""
+
+
+def _path(folder):
+    return os.path.join(folder or data_dir(), SETTINGS_NAME)
+
+
+def _read_raw(path):
+    """The file's JSON object, {} when it doesn't exist. Raises SettingsFileError."""
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            raw = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SettingsFileError(f"settings file could not be read ({e.__class__.__name__})")
+    if not isinstance(raw, dict):
+        raise SettingsFileError("settings file is not a JSON object")
+    return raw
+
+
+def _write_atomic(path, data):
+    """Write the whole file next to it first, then swap it in (never half-written)."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read(folder=None):
+    """Settings as they are in the file now (validated), for the settings
+    window. Raises SettingsFileError for a broken file; a missing file = defaults."""
+    raw = _read_raw(_path(folder))
+    return validate(raw)[0]
+
+
+def save_changes(changes, folder=None):
+    """Write only `changes` ({key: value}) into the settings file, keeping every
+    other key exactly as it is (hand edits, unknown keys). Each value must be
+    valid as given (ValueError otherwise). Raises SettingsFileError (nothing
+    written) when the file is broken, OSError when it can't be written.
+    Returns the validated changes."""
+    path = _path(folder)
+    raw = _read_raw(path)
+    for key in changes:
+        if key not in DEFAULTS:
+            raise ValueError(f"unknown setting {key!r}")
+    checked, warnings = validate(dict(changes))
+    bad = [w for w in warnings if w.split(":")[0] in changes]
+    if bad:
+        raise ValueError(bad[0])
+    out = {key: checked[key] for key in changes}
+    for key, value in out.items():
+        if isinstance(value, float) and value != changes[key]:
+            raise ValueError(f"{key}: out of range")
+    data = dict(raw) if raw else dict(DEFAULTS)
+    data.update(out)
+    _write_atomic(path, data)
+    return out
+
+
+def broken_path(folder):
+    """First free backup name: settings.broken.json, then settings.broken-2.json, ..."""
+    base, ext = os.path.splitext(os.path.join(folder, BROKEN_NAME))
+    path, n = base + ext, 1
+    while os.path.exists(path):
+        n += 1
+        path = f"{base}-{n}{ext}"
+    return path
+
+
+def reset(folder=None):
+    """Keep the current (broken) file as a new backup (never over an older
+    one: settings.broken.json, settings.broken-2.json, ...), then write the
+    defaults. Returns the defaults."""
+    path = _path(folder)
+    if os.path.exists(path):
+        os.rename(path, broken_path(os.path.dirname(path)))  # rename never overwrites
+    _write_atomic(path, DEFAULTS)
+    return dict(DEFAULTS)
+
+
 def load(folder=None):
     """Load settings from folder (default data_dir()). Writes a default file if missing."""
     folder = folder or data_dir()

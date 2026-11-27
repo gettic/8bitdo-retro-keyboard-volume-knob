@@ -9,7 +9,7 @@ from knob import gdi, menu, ui
 from tests.fakes import settings
 from tests.test_display import FakeShell
 
-ITEMS = ui.menu_items(False)          # head, sep, Pause, Open log, Open settings, sep, Quit
+ITEMS = ui.menu_items(False)          # head, row, sep, Pause, Open log, Settings, sep, Quit
 ROW_I, PAUSE, LOG, SETTINGS, QUIT = 1, 3, 4, 5, 7   # head, row, sep, ..., sep, Quit
 MUTE_K = 4                                          # the speaker button in the row
 

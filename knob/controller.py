@@ -1,6 +1,7 @@
 """Audio thread: polls sound levels, and applies knob keys to apps and tabs."""
 import logging
 import queue
+import threading
 import time
 
 from . import display as view
@@ -27,12 +28,15 @@ class Controller:
     it is called on the controller's own thread (COM is per thread)."""
 
     def __init__(self, settings, audio_factory, bridge, clock=time.monotonic,
-                 process_lister=_running_exes, display=None, spotify=None):
+                 process_lister=_running_exes, display=None, spotify=None,
+                 spotify_factory=None):
         self.settings = settings
-        # spotify: spotify_api.SpotifyVolume (Spotify's own bar) or None (mixer only)
+        # spotify: spotify_api.SpotifyVolume (Spotify's own bar) or None (mixer only);
+        # spotify_factory() makes a new one when the settings window switches to "web"
         self.spotify = spotify
+        self.spotify_factory = spotify_factory
         if spotify is not None:
-            spotify.on_change = lambda: self.keys.put(("spotify",))
+            spotify.on_change = self._spotify_changed
         # display(rows, popup): pop-up / tray icon sink (ui.Ui.show), called on this thread
         self.display = display
         self._shown = None      # sources the knob changed last: ("app", exe) / ("tab", client, id)
@@ -51,6 +55,9 @@ class Controller:
         self._refreshed = None
         self._warned = set()
         bridge.events = self.keys.put  # tab states / host gone -> this thread
+
+    def _spotify_changed(self):
+        self.keys.put(("spotify",))
 
     # --- called from other threads ---
     def press(self, action):
@@ -340,6 +347,44 @@ class Controller:
             return 1.0
         return self.settings["boost_max"]
 
+    # --- settings changed while running ---
+    def apply_settings(self, changes):
+        """Use new setting values from now on (this thread)."""
+        for key, value in changes.items():
+            self.settings[key] = value
+        if "peak_threshold" in changes:
+            self.activity.threshold = changes["peak_threshold"]
+        if "hold_seconds" in changes:
+            self.activity.hold = changes["hold_seconds"]
+        if "failsafe" in changes:
+            self.failsafe.enabled = bool(changes["failsafe"])
+        if "failsafe_level" in changes:
+            self.failsafe.level = changes["failsafe_level"]
+        if "failsafe_start_window" in changes:
+            self.failsafe.start_window = changes["failsafe_start_window"]
+        if "spotify_control" in changes:
+            self._switch_spotify(changes["spotify_control"])
+        if "apps" in changes or "brave_fallback" in changes:
+            self._refreshed = None  # rebuild the session list on the next poll
+        self.update_display()
+
+    def _switch_spotify(self, mode):
+        if mode == "mixer" and self.spotify is not None:
+            old, self.spotify = self.spotify, None
+            # its worker may be waiting on the network: don't hold up the knob
+            threading.Thread(target=old.close, name="spotify-close", daemon=True).start()
+            log.info("Spotify: Windows mixer from now on")
+        elif mode == "web" and self.spotify is None:
+            if self.spotify_factory is None:
+                log.info("Spotify's own slider: used after a restart")
+                return
+            new = self.spotify_factory()
+            new.on_change = self._spotify_changed
+            new.start()
+            self.spotify = new
+            self._refreshed = None  # tells it on the next refresh whether Spotify is open
+            log.info("Spotify: its own slider from now on (when logged in)")
+
     # --- failsafe ---
     def _apps_open(self):
         apps = set(self.settings["apps"]) - {BRAVE}
@@ -357,6 +402,9 @@ class Controller:
             return
         if event[0] == "spotify":  # Spotify's own volume / Web API state changed
             self.update_display()
+            return
+        if event[0] == "settings":  # saved in the settings window
+            self.apply_settings(event[1])
             return
         if event[0] == "gone":
             self.failsafe.host_gone(event[1])

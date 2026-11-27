@@ -65,11 +65,12 @@ def run_program():
     state = BrowserState()
     bridge = BrowserBridge(state, time.monotonic)
     from .coreaudio import CoreAudio
+    from .spotify_api import SpotifyVolume
     spotify = None
     if settings["spotify_control"] == "web":
-        from .spotify_api import SpotifyVolume
         spotify = SpotifyVolume()  # does nothing online until --spotify-login was done
-    ctl = Controller(settings, CoreAudio, bridge, spotify=spotify)  # also hooks bridge events
+    # also hooks bridge events; the factory is for switching to "web" in the settings window
+    ctl = Controller(settings, CoreAudio, bridge, spotify=spotify, spotify_factory=SpotifyVolume)
     if spotify:
         spotify.start()
     server = None
@@ -96,8 +97,8 @@ def run_program():
     finally:
         ctl.stop()
         worker.join(3)
-        if spotify:
-            spotify.close()
+        if ctl.spotify:  # may have been switched in the settings window
+            ctl.spotify.close()
         if ui:
             ui.close()
         if server:
@@ -122,6 +123,7 @@ def _make_ui(settings, ctl, stop, log):
         from .ui import Ui
         ui = Ui(settings, on_quit=lambda: kernel32.SetEvent(stop), on_pause=pause,
                 on_key=ctl.press,
+                on_settings=lambda changes: ctl.press(("settings", changes)),
                 log_path=os.path.join(config.log_dir(), config.LOG_NAME),
                 settings_path=os.path.join(config.data_dir(), config.SETTINGS_NAME))
         ui.create()

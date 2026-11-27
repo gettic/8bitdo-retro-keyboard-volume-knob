@@ -204,8 +204,11 @@ def _check_display(rep):
             mw, mh, mdata = menu.render(ui.menu_items(False), None, 1.0, False)
             icon = ui.make_hicon(24, ui.icon_pixels(24, 45, number=True))
             ui.user32.DestroyIcon(icon)
+            from . import settings_window
+            sw, sh, sdata = settings_window.render(dict(config.DEFAULTS))  # memory only
             drawn = (len(data) == w * h * 4 and data[3] == 0
-                     and len(mdata) == mw * mh * 4 and mdata[3] == 0)
+                     and len(mdata) == mw * mh * 4 and mdata[3] == 0
+                     and len(sdata) == sw * sh * 4)
             return hidden, calls[:1] == [ui.NIM_ADD], drawn
         finally:
             u.close()

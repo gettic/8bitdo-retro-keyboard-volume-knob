@@ -9,6 +9,7 @@ import knob.coreaudio
 import knob.hotkeys
 import knob.menu
 import knob.osd
+import knob.settings_window
 import knob.ui
 
 
@@ -31,6 +32,7 @@ knob.ui.open_file = _blocked           # no Notepad
 knob.osd.Osd._present = _blocked       # the pop-up window is never shown
 knob.menu.Menu._present = _blocked     # nor the tray menu
 knob.menu.Menu._activate = _blocked
+knob.settings_window.SettingsWindow._show = _blocked  # nor the settings window
 
 logging.getLogger("knob").addHandler(logging.NullHandler())
 logging.getLogger("knob").propagate = False

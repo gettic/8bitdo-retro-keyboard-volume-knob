@@ -434,16 +434,15 @@ class UiWindowTests(unittest.TestCase):
     def test_menu_commands_and_status(self):
         self.ui.command(ui.CMD_PAUSE)
         self.ui.command(ui.CMD_LOG)
-        self.ui.command(ui.CMD_SETTINGS)
         self.ui.command(ui.CMD_QUIT)
         self.assertEqual(self.events, [("pause", True), "quit"])
-        self.assertEqual(self.opened, ["L", "S"])
+        self.assertEqual(self.opened, ["L"])
         self.ui.keys_status(False, True)
         self.assertIn("paused", self.shell.calls[-1][1])
         items = ui.menu_items(True)
         self.assertEqual([t for c, t, e in items if c == ui.CMD_PAUSE], ["Resume"])
         self.assertEqual([t for c, t, e in ui.menu_items(False)][3:6],
-                         ["Pause", "Open log", "Open settings"])
+                         ["Pause", "Open log", "Settings"])
         self.ui.keys_status(False, False)
         self.assertIn("in use", self.shell.calls[-1][1])
 
