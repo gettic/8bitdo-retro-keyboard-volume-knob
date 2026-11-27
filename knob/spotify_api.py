@@ -3,13 +3,17 @@
 - Login data: %APPDATA%\\8BitDo Volume Knob\\spotify.json (client ID in plain text,
   refresh token encrypted with Windows DPAPI for the current user). The access
   token lives in memory only. Tokens, codes and track data are never logged.
-- `SpotifyVolume` runs one worker thread: knob clicks are bundled into at most
-  one PUT every 0.3 s, the volume is read with GET /me/player when the last
-  read is over 5 s old and every 10 s while Spotify runs. It is only "usable"
+- `SpotifyVolume` runs one worker thread: knob clicks are sent one PUT at a
+  time, the next one 0.1 s after the last ended (clicks in between bundled; at
+  most 100 PUTs per 30 s); a short "slow down" (429) holds the clicks until
+  Spotify's Retry-After instead of falling back to the mixer. The volume is read
+  with GET /me/player when the last read is over 5 s old and every 10 s while
+  Spotify runs. It is only "usable"
   while Spotify plays on this PC (the device saved at login, or the Computer
   device named like this PC); otherwise the controller uses the Windows mixer.
 Standard library and ctypes only."""
 import base64
+import collections
 import ctypes
 import ctypes.wintypes as wt
 import http.client
@@ -35,7 +39,10 @@ REDIRECT_URI = f"http://127.0.0.1:{REDIRECT_PORT}/callback"
 TIMEOUT = 2.0
 MAX_BODY = 1024 * 1024
 
-MIN_GAP = 0.3        # seconds between two volume PUTs
+MIN_GAP = 0.1        # seconds from the end of one volume PUT to the next (one at a time)
+PUT_BUDGET = 100     # at most this many volume PUTs ...
+PUT_WINDOW = 30.0    # ... per this many seconds (Spotify rate-limits per 30 s)
+SHORT_WAIT = 10.0    # a 429 asking to wait this long or less holds the clicks (no mixer fallback)
 REREAD_AFTER = 5.0   # a click after this long without news reads the volume first
 POLL = 10.0          # read the volume this often while Spotify runs
 RETRY = 30.0         # after a failure, try again this much later
@@ -219,9 +226,10 @@ def token_request(opener, accounts, fields, timeout=TIMEOUT):
 class ApiError(Exception):
     """A failure with a short, token-free reason and how long to wait."""
 
-    def __init__(self, reason, wait=RETRY, relogin=False):
+    def __init__(self, reason, wait=RETRY, relogin=False, slow=False):
         super().__init__(reason)
         self.reason, self.wait, self.relogin = reason, wait, relogin
+        self.slow = slow  # 429: Spotify asked to slow down
 
 
 def _retry_after(resp):
@@ -302,7 +310,7 @@ class Client:
         if r.status == 404:
             raise ApiError("Spotify has no active device", wait=5)
         if r.status == 429:
-            raise ApiError("Spotify asked to slow down", _retry_after(r))
+            raise ApiError("Spotify asked to slow down", _retry_after(r), slow=True)
         raise ApiError(f"Spotify answered HTTP {r.status}")
 
     def player(self):
@@ -356,7 +364,7 @@ class SpotifyVolume:
     methods (usable, level, step, set_present) never block on the network."""
 
     def __init__(self, path=None, api=API, accounts=ACCOUNTS, clock=time.monotonic,
-                 on_change=None, timeout=TIMEOUT, pc_name=None, tick=0.05):
+                 on_change=None, timeout=TIMEOUT, pc_name=None, tick=0.025):
         self.path = path or store_path()
         self.api, self.accounts = api, accounts
         self.clock = clock
@@ -376,6 +384,8 @@ class SpotifyVolume:
         self._last_read = None
         self._last_put = None
         self._wait_until = 0.0
+        self._held = False       # waiting out a short 429: clicks kept, still usable
+        self._puts = collections.deque()  # start times of recent PUTs (PUT_BUDGET)
         self._client = None
         self._creds = None
         self._mtime = None
@@ -486,7 +496,13 @@ class SpotifyVolume:
     def _fail(self, err, now):
         with self._cond:
             self._wait_until = now + err.wait
-        self._set_state(False, err.reason)
+            # a short "slow down" while working: keep the clicks, stay on Spotify's bar
+            hold = err.slow and err.wait <= SHORT_WAIT and self._ok
+            if hold and not self._held:
+                log.debug("Spotify asked to slow down; holding clicks %.1f s", err.wait)
+            self._held = hold
+        if not hold:
+            self._set_state(False, err.reason)
 
     def _read(self, now):
         try:
@@ -522,20 +538,33 @@ class SpotifyVolume:
             if self._known is None:
                 self._pending = 0.0
                 return None
-            base = self._base()
-            new = _clamp(base + self._pending)
-            self._pending = 0.0
             dev = self._creds.get("device_id") if self._creds else None
+            if not dev:
+                self._pending = 0.0
         if not dev:
             return self._fail(ApiError("this PC's Spotify device is not known yet", wait=0), now)
+        with self._cond:
+            old = (self._exact, self._known)
+            new = _clamp(self._base() + self._pending)
+            self._pending = 0.0
+            # counted as set while the PUT runs, so level() and clicks during the
+            # call build on it (the card never drops back while turning)
+            self._exact, self._known = new, round(new * 100) / 100.0
+            self._puts.append(now)
         try:
             self._client.set_volume(round(new * 100), dev)
         except ApiError as e:
-            return self._fail(e, now)
+            with self._cond:
+                # not sent: Spotify still has the old volume; the clicks go back in
+                # the queue (kept after a short 429, dropped by a fallback)
+                target = _clamp(new + self._pending)
+                self._exact, self._known = old
+                self._pending = target - self._base()
+            self._fail(e, now)
+            return None
+        done = self.clock()  # the next PUT's gap counts from the end of this one
         with self._cond:
-            self._exact = new
-            self._known = round(new * 100) / 100.0
-            self._last_put = self._last_read = now
+            self._last_put = self._last_read = done
         self._changed()
 
     def _run(self):
@@ -561,15 +590,23 @@ class SpotifyVolume:
         with self._cond:
             present, pending = self._present, self._pending
             waiting = now < self._wait_until
+            if not waiting:
+                self._held = False
+            held = self._held
             last_read, last_put = self._last_read, self._last_put
+            while self._puts and now - self._puts[0] >= PUT_WINDOW:
+                self._puts.popleft()
+            budget_left = len(self._puts) < PUT_BUDGET
         if not present or waiting:
-            if pending:
+            if pending and not (present and held):  # a held 429 keeps the clicks
                 with self._cond:
                     self._pending = 0.0
             return
         stale = last_read is None or now - last_read >= REREAD_AFTER
         if pending:
             if last_put is not None and now - last_put < MIN_GAP:
+                return
+            if not budget_left:  # clicks stay bundled until the 30 s window has room
                 return
             if stale:
                 self._read(now)

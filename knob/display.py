@@ -1,11 +1,13 @@
 """What the volume pop-up and the tray icon show. Pure logic, no Windows calls.
 
 A `Row` is one app or site: its name, volume (0-1.5), mute state and the
-highest volume it can reach (1.0, or 1.5 for a boost-capable YouTube tab)."""
+highest volume it can reach (1.0, or 1.5 for a boost-capable YouTube tab).
+`at_max` (default False): the knob was just turned up at the top, so the pop-up
+says "Max" instead of the percent (Spotify cannot go past 100 %)."""
 import collections
 import math
 
-Row = collections.namedtuple("Row", "name level muted max_level")
+Row = collections.namedtuple("Row", "name level muted max_level at_max", defaults=(False,))
 
 TITLE = "8BitDo Volume Knob"
 NAMES = {"spotify.exe": "Spotify", "brave.exe": "Brave",

@@ -16,6 +16,7 @@ SPOTIFY = "spotify.exe"
 POLL_INTERVAL = 0.2
 REFRESH_INTERVAL = 2.0
 GUESS_SECONDS = 1.0  # a tab's predicted volume wins over its (older) reported state this long
+MAX_SECONDS = 1.5    # an app turned up at 100 % shows "Max" on the pop-up this long
 
 
 def _running_exes(names):
@@ -41,6 +42,7 @@ class Controller:
         self.display = display
         self._shown = None      # sources the knob changed last: ("app", exe) / ("tab", client, id)
         self._guess = {}        # (client, tab id) -> (level, muted, time) predicted after a step
+        self._at_max = {}       # exe -> time it was turned up while at 100 % ("Max" on the card)
         self._last_rows = None
         self.audio_factory = audio_factory
         self.bridge = bridge
@@ -164,6 +166,7 @@ class Controller:
         d = router.decide("up", apps, tabs, self.settings["step"])  # only the targets matter
         log.debug("set %.2f -> %r", level, d)
         for exe in d.apps:
+            self._at_max.pop(exe, None)
             web = self._spotify_web(exe)
             for s in by_exe[exe]:
                 try:
@@ -201,6 +204,7 @@ class Controller:
         d = router.decide(action, apps, tabs, self.settings["step"])
         log.debug("key %s -> %r", action, d)
         for exe in d.apps:
+            self._note_max(exe, by_exe[exe], d, now)
             if d.muted is None and self._spotify_web(exe):
                 # Spotify's own bar; mute (and un-muting on a turn) stays the Windows mixer's
                 for s in by_exe[exe]:
@@ -238,6 +242,21 @@ class Controller:
         return d
 
     # --- what the pop-up and the tray icon show ---
+    def _note_max(self, exe, group, d, now):
+        """Windows apps (Spotify's own bar too) stop at 100 %: a turn up while
+        already there marks the app so its card row says "Max"; any other key clears it."""
+        self._at_max.pop(exe, None)
+        if d.muted is not None or d.delta <= 0 or not group:
+            return
+        try:
+            level = self.spotify.level() if self._spotify_web(exe) else None
+            if level is None:
+                level = group[0].volume()
+        except OSError:
+            return
+        if view.percent(level) >= 100:
+            self._at_max[exe] = now
+
     def _guess_tabs(self, client, ids, by_key, d, now):
         """Tab states arrive after the extension applied a step, so the shown
         volume is predicted the way the extension computes it."""
@@ -287,7 +306,11 @@ class Controller:
             level = self.spotify.level() if self._spotify_web(exe) else None
             if level is None:
                 level = group[0].volume()
-            return view.Row(view.name_for(exe), level, all(s.muted() for s in group), 1.0)
+            t = self._at_max.get(exe)
+            at_max = (t is not None and self.clock() - t < MAX_SECONDS
+                      and view.percent(level) >= 100)
+            return view.Row(view.name_for(exe), level, all(s.muted() for s in group), 1.0,
+                            at_max)
         except OSError:
             return None
 

@@ -133,7 +133,8 @@ def render(rows, scale=1.0, light=False):
                         16 * s, t["fg"], face=face)
             name_x = (46 if face else 16) * s
             bm.text(row.name, name_x, top, w - name_x - 90 * s, 28 * s, 13 * s, t["fg"])
-            label = "Muted" if row.muted else f"{view.percent(row.level)}%"
+            label = "Muted" if row.muted else (
+                "Max" if row.at_max else f"{view.percent(row.level)}%")
             colour = t["dim"] if row.muted else (t["boost"] if boost else t["fg"])
             bm.text(label, w - 96 * s, top, 80 * s, 28 * s, 15 * s, colour, weight=600,
                     align=gdi.DT_RIGHT)

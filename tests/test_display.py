@@ -329,6 +329,16 @@ class OsdDrawTests(unittest.TestCase):
             b, g, r, a = data[(by * w + bx) * 4:(by * w + bx) * 4 + 4]
             self.assertTrue(r > 150 and b < 100, (r, g, b))
 
+    def test_render_max_label(self):
+        """A row turned up at 100 % says "Max": a different label, same bar."""
+        _, _, pct = osd.render([Row("Spotify", 1.0, False, 1.0)], 1.0, False)
+        w, h, mx = osd.render([Row("Spotify", 1.0, False, 1.0, True)], 1.0, False)
+        self.assertNotEqual(pct, mx)
+        text = slice(12 * w * 4, 40 * w * 4)                 # the text line of the row
+        bar = slice(50 * w * 4, h * w * 4)                   # the bar and below
+        self.assertNotEqual(pct[text], mx[text])
+        self.assertEqual(pct[bar], mx[bar])
+
     def fake_monitors(self, cursor):
         """Main screen 0..1920 at 100 %, second screen 1920..4480 at 150 %."""
         mons = {1: ((0, 0, 1920, 1032), 1.0), 2: ((1920, 0, 4480, 1400), 1.5)}

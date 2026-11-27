@@ -58,6 +58,9 @@ class FakeSpotify:
         self.access = ACCESS
         self.new_refresh = None
         self.puts = []
+        self.put_times = []      # monotonic start time of every accepted PUT
+        self.active_puts = 0
+        self.max_active_puts = 0  # > 1 would mean two PUTs at the same time
         self.gets = 0
         self.token_calls = []
         fake = self
@@ -124,6 +127,17 @@ class FakeSpotify:
                 self._send(404)
 
             def do_PUT(self):
+                with fake.lock:
+                    fake.active_puts += 1
+                    fake.max_active_puts = max(fake.max_active_puts, fake.active_puts)
+                try:
+                    self._put()
+                finally:
+                    with fake.lock:
+                        fake.active_puts -= 1
+
+            def _put(self):
+                start = time.monotonic()
                 time.sleep(fake.delay)
                 if not self._auth():
                     return self._send(401, {"error": {"status": 401}})
@@ -135,6 +149,7 @@ class FakeSpotify:
                     st = fake.put_status
                     if st == 200:
                         fake.puts.append((int(q["volume_percent"]), q.get("device_id")))
+                        fake.put_times.append(start)
                         fake.volume = int(q["volume_percent"])
                 if st != 200:
                     return self._api_status(st)
@@ -353,7 +368,7 @@ class VolumeTests(Base):
         self.assertAlmostEqual(v.level(), 0.63)
         self.assertTrue(wait_for(lambda: self.fake.puts and self.fake.puts[-1][0] == 63))
         time.sleep(0.4)
-        self.assertLessEqual(len(self.fake.puts), 3)          # 10 clicks, few calls
+        self.assertLessEqual(len(self.fake.puts), 5)          # 10 clicks, few calls
         self.assertTrue(all(d == "dev-pc" for _, d in self.fake.puts))
         self.assertEqual(self.fake.volume, 63)
 
@@ -382,6 +397,83 @@ class VolumeTests(Base):
         time.sleep(0.4)
         self.assertEqual(self.fake.volume, 100)
         self.assertEqual([p for p, _ in self.fake.puts], [100])
+
+    def turn(self, v, clicks, rate=10.0, step=0.013):
+        t0 = time.monotonic()
+        shown = []
+        for i in range(clicks):
+            while time.monotonic() < t0 + i / rate:
+                time.sleep(0.002)
+            shown.append(v.step(step))
+        return shown
+
+    def test_real_pace_small_jumps_one_at_a_time_exact_end(self):
+        for delay, most in ((0.0, 3), (0.15, 4)):  # was 4-5 / 5 % with 0.3 s from the start
+            with self.subTest(delay=delay):
+                self.fake.volume, self.fake.delay = 30, delay
+                self.fake.puts.clear()
+                self.fake.max_active_puts = 0
+                v = self.make()
+                v.set_present(True)
+                self.assertTrue(wait_for(v.usable))
+                shown = self.turn(v, 30)  # 3 s at 10 clicks/s
+                # the card moves one step per click, never back while a PUT is on its way
+                for i, s in enumerate(shown):
+                    self.assertAlmostEqual(s, 0.30 + (i + 1) * 0.013)
+                end = 30 + round(30 * 1.3)  # 69
+                self.assertTrue(wait_for(lambda: self.fake.volume == end))
+                vols = [30] + [p for p, _ in self.fake.puts]
+                jumps = [b - a for a, b in zip(vols, vols[1:])]
+                self.assertLessEqual(max(jumps), most, jumps)
+                self.assertLess(len(self.fake.puts), 30)     # still bundled a little
+                self.assertEqual(self.fake.max_active_puts, 1)  # never two PUTs at once
+                self.assertAlmostEqual(v.level(), 0.30 + 30 * 0.013)
+                v.close()
+
+    def test_put_budget_per_30_seconds(self):
+        self.login_file()
+        now = [0.0]
+        v = api.SpotifyVolume(self.path, self.fake.api, self.fake.accounts,
+                              clock=lambda: now[0], pc_name=PC)
+        v.set_present(True)
+        v._work(0.0)  # first read, worker driven by hand with a fake clock
+        self.assertTrue(v.usable())
+        def run(first, last):  # non-stop turning, 20 ticks/s of fake time
+            for i in range(first, last):
+                now[0] = i * 0.05
+                v.step(0.013 if i % 2 else -0.013)
+                v._work(now[0])
+        run(1, 599)  # the first 30 s
+        self.assertEqual(len(self.fake.puts), api.PUT_BUDGET)  # capped, not ~300
+        run(599, 700)  # 30-35 s: the oldest ones leave the window, sends go on
+        self.assertGreater(len(self.fake.puts), api.PUT_BUDGET)
+        self.assertLessEqual(len(v._puts), api.PUT_BUDGET)  # never more per 30 s
+        v.close()
+
+    def test_short_slow_down_holds_clicks(self):
+        v = self.make()
+        v.set_present(True)
+        self.assertTrue(wait_for(v.usable))
+        self.fake.put_status, self.fake.retry_after = 429, 1
+        self.turn(v, 5)
+        time.sleep(0.2)
+        self.assertTrue(v.usable())                          # still Spotify's own bar
+        self.assertFalse(any("Windows mixer" in m for m in self.logs))
+        self.assertAlmostEqual(v.level(), 0.5 + 5 * 0.013)   # clicks kept, card right
+        self.turn(v, 3)                                      # more clicks while held
+        self.fake.put_status = 200
+        self.assertTrue(wait_for(lambda: self.fake.volume == round(50 + 8 * 1.3), 4))
+        self.assertTrue(v.usable())
+        self.assertFalse(any("Windows mixer" in m for m in self.logs))
+
+    def test_long_slow_down_falls_back(self):
+        v = self.make()
+        v.set_present(True)
+        self.assertTrue(wait_for(v.usable))
+        self.fake.put_status, self.fake.retry_after = 429, 60
+        v.step(0.013)
+        self.assertTrue(wait_for(lambda: not v.usable()))
+        self.assertEqual(sum("slow down; using the Windows mixer" in m for m in self.logs), 1)
 
     def test_moved_in_spotify_is_picked_up(self):
         v = self.make()
@@ -660,6 +752,25 @@ class ControllerTests(unittest.TestCase):
         self.ctl.on_event(self.ctl.keys.get_nowait())
         self.assertEqual(len(self.shown), n + 1)
         self.assertAlmostEqual(self.shown[-1][0].level, 0.9)
+
+    def test_max_shown_when_turned_up_at_100(self):
+        self.web._level = 0.99
+        self.ctl.handle("up")                      # reaches 100 %: shows the percent
+        self.assertFalse(self.shown[-1][0].at_max)
+        self.ctl.handle("up")                      # already at the top: "Max"
+        row = self.shown[-1][0]
+        self.assertEqual((row.level, row.at_max, row.max_level), (1.0, True, 1.0))
+        self.clock.advance(controller.MAX_SECONDS + 0.1)
+        self.ctl.update_display()                  # briefly only
+        self.assertFalse(self.shown[-1][0].at_max)
+        self.ctl.handle("up")
+        self.ctl.handle("down")                    # any other turn clears it
+        self.assertFalse(self.shown[-1][0].at_max)
+        self.web._usable = False                   # mixer path: same rule
+        self.spotify._volume = 1.0
+        self.ctl.handle("up")
+        self.assertTrue(self.shown[-1][0].at_max)
+        self.assertEqual(self.spotify._volume, 1.0)
 
     def test_without_spotify_object_unchanged(self):
         ctl = Controller(settings(), lambda: self.audio, self.bridge, clock=self.clock,

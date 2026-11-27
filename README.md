@@ -16,7 +16,7 @@ While the program runs, it takes over the volume keys: Windows' own master volum
 
 ## Volume card
 
-When you turn the knob, a small card shows at the bottom of the screen, like the one Windows has. It shows the app's name (Spotify, YouTube or YouTube Music; one block each when the knob changes more than one), the volume in %, and a bar. Above 100 % the bar turns orange, with a mark at 100 %. A muted app shows "Muted".
+When you turn the knob, a small card shows at the bottom of the screen, like the one Windows has. It shows the app's name (Spotify, YouTube or YouTube Music; one block each when the knob changes more than one), the volume in %, and a bar. Above 100 % the bar turns orange, with a mark at 100 %. A muted app shows "Muted". When Spotify is at 100 % and you turn up, the card shows "Max".
 
 - It goes away 1.5 seconds after the last turn.
 - It appears on your main screen. To show it on the screen where the mouse is, set `osd_monitor` to `"mouse"`.
@@ -49,7 +49,7 @@ On Windows 11, a new icon may first be hidden under the ^ arrow by the clock. Dr
 
 ## Spotify's own volume bar
 
-This needs Spotify Premium. Do the setup once. After that the knob moves the volume bar inside Spotify, in the same 1.3 % steps, up to 100 %. Spotify's volume shown in the card and tray icon is Spotify's own.
+This needs Spotify Premium. Do the setup once. After that the knob moves the volume bar inside Spotify, in the same 1.3 % steps, up to 100 %. Fast turning stays smooth, and a short "slow down" from Spotify doesn't switch to the Windows mixer. Spotify's volume shown in the card and tray icon is Spotify's own.
 
 Setup:
 
@@ -258,7 +258,7 @@ python -E -s -m unittest setup_knob.test_setup
 Build the release zip (no packages needed):
 
 ```
-python -I make_release.py --version 1.5.0
+python -I make_release.py --version 1.5.1
 ```
 
 ## License
