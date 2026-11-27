@@ -98,15 +98,20 @@ def _target(tabs, site):
     return {"site": site}
 
 
+MAX_DELTA = 0.2   # |delta| of one volume command (the largest step setting)
+SET_MAX = 1.0     # set_volume never boosts
+
+
 def volume(delta, tabs=None, site="all", max_volume=1.0):
-    msg = {"type": "volume", "delta": round(float(delta), 4),
+    delta = min(MAX_DELTA, max(-MAX_DELTA, float(delta)))
+    msg = {"type": "volume", "delta": round(delta, 4),
            "max": round(_clamp(max_volume), 4)}
     msg.update(_target(tabs, site))
     return msg
 
 
 def set_volume(value, tabs=None, site="all"):
-    msg = {"type": "set_volume", "volume": round(_clamp(value), 4)}
+    msg = {"type": "set_volume", "volume": round(_clamp(value, SET_MAX), 4)}
     msg.update(_target(tabs, site))
     return msg
 

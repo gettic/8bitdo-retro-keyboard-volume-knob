@@ -5,7 +5,8 @@ no exe). The zip holds the same files setup copies to Program Files, plus README
     -> dist\\8bitdo-volume-knob-1.1.0.zip   (top folder "8BitDo Volume Knob\\")
 
 Steps: version check against version.py, stage the files in dist\\stage\\, check required
-and forbidden files, run the staged program's --self-test once (read-only, quiet), zip.
+and forbidden files and that every shipped file is committed in git (read-only git calls;
+build after committing), run the staged program's --self-test once (read-only, quiet), zip.
 Exit 0: OK, the last printed line is the zip path. Exit 1: something failed (printed).
 """
 import argparse
@@ -23,7 +24,8 @@ from setup_knob import setup  # noqa: E402  (the copy list lives there)
 
 TOP = setup.APP                                  # "8BitDo Volume Knob"
 EXTRA_FILES = ("README.md",)
-FORBIDDEN_EXT = (".exe", ".dll", ".pyd", ".cmd", ".bat", ".vbs", ".ps1", ".pyc", ".spec")
+FORBIDDEN_EXT = (".exe", ".dll", ".pyd", ".cmd", ".bat", ".vbs", ".ps1", ".pyc", ".spec",
+                 ".pem", ".crx", ".key", ".zip", ".log", ".tmp", ".bak")
 FORBIDDEN_PARTS = ("tests", "__pycache__", "build", "dist", ".git", "native_host")
 REQUIRED_EXTRA = (os.path.join("extension", "background.js"),
                   os.path.join("extension", "content.js"),
@@ -42,21 +44,51 @@ def read_version():
     return m.group(1)
 
 
-def stage(dest):
+def stage(dest, src=HERE):
     """Copy setup's file list plus the extra files into dest (fresh)."""
     if os.path.exists(dest):
         shutil.rmtree(dest)
-    setup.copy_program(HERE, dest)
+    setup.copy_program(src, dest)
     os.remove(os.path.join(dest, setup.MARKER))  # setup writes its own marker on install
     for name in EXTRA_FILES:
-        shutil.copy2(os.path.join(HERE, name), os.path.join(dest, name))
+        shutil.copy2(os.path.join(src, name), os.path.join(dest, name))
 
 
-def check(dest):
-    """Every expected file there with the right size, nothing forbidden. Returns the list."""
-    expected = setup.expected_files(HERE)
+def run_git(args, src=HERE):
+    """Read-only git call in src; returns the NUL-separated output as a list."""
+    try:
+        p = subprocess.run(["git"] + args, cwd=src, stdin=subprocess.DEVNULL,
+                           capture_output=True, timeout=60,
+                           creationflags=0x08000000)  # CREATE_NO_WINDOW
+    except (OSError, subprocess.SubprocessError) as e:
+        raise ReleaseError("git is needed to check the release files (%s)" % e)
+    if p.returncode != 0:
+        raise ReleaseError("git %s failed: %s" % (args[0], p.stderr.decode("utf-8", "replace")
+                                                  .strip()[:500]))
+    return [s for s in p.stdout.decode("utf-8", "replace").split("\0") if s]
+
+
+def committed_problems(found, git=run_git):
+    """Shipped files that git doesn't track or that have uncommitted changes, so only
+    what is in the commit goes into the zip (no stray scratch files)."""
+    tracked = {os.path.normpath(p) for p in git(["ls-files", "-z"])}
+    changed = {os.path.normpath(p) for p in
+               git(["diff", "--name-only", "--relative", "-z", "HEAD", "--"])}
+    problems = []
+    for rel in found:
+        if rel not in tracked:
+            problems.append("not committed (new file): " + rel)
+        elif rel in changed:
+            problems.append("not committed (changed): " + rel)
+    return problems
+
+
+def check(dest, src=HERE, git=run_git):
+    """Every expected file there with the right size, nothing forbidden, everything
+    committed. Returns the list."""
+    expected = setup.expected_files(src)
     for name in EXTRA_FILES:
-        expected[name] = os.path.getsize(os.path.join(HERE, name))
+        expected[name] = os.path.getsize(os.path.join(src, name))
     found = []
     for folder, _, files in os.walk(dest):
         for f in files:
@@ -76,6 +108,7 @@ def check(dest):
         if rel.lower().endswith(FORBIDDEN_EXT) or any(p in FORBIDDEN_PARTS for p in parts[:-1]) \
                 or os.path.basename(rel).lower().startswith("test_"):
             problems.append("forbidden file: " + rel)
+    problems += committed_problems(found, git)
     if problems:
         raise ReleaseError("staged files are wrong:\n  " + "\n  ".join(problems))
     return sorted(found)

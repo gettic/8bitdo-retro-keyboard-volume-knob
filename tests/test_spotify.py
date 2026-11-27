@@ -9,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 import urllib.parse
 import urllib.request
 
@@ -62,10 +63,21 @@ class FakeSpotify:
         self.active_puts = 0
         self.max_active_puts = 0  # > 1 would mean two PUTs at the same time
         self.gets = 0
+        self.get_queries = []
+        self.connections = 0
+        self.hang_up = False
+        self.redirect = False
         self.token_calls = []
         fake = self
 
         class H(http.server.BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"  # keep-alive, like Spotify
+
+            def setup(self):
+                super().setup()
+                with fake.lock:
+                    fake.connections += 1
+
             def log_message(self, *a):
                 pass
 
@@ -78,6 +90,8 @@ class FakeSpotify:
                 self.end_headers()
                 if body:
                     self.wfile.write(body)
+                if fake.hang_up:  # closes the idle connection without saying so
+                    self.close_connection = True
 
             def _auth(self):
                 with fake.lock:
@@ -111,9 +125,13 @@ class FakeSpotify:
                 time.sleep(fake.delay)
                 if not self._auth():
                     return self._send(401, {"error": {"status": 401}})
-                if self.path == "/v1/me/player":
+                u = urllib.parse.urlsplit(self.path)
+                if fake.redirect:
+                    return self._send(302, None, {"Location": "http://127.0.0.1:9/steal"})
+                if u.path == "/v1/me/player":
                     with fake.lock:
                         fake.gets += 1
+                        fake.get_queries.append(u.query)
                         st = fake.player_status
                         dev = dict(fake.device, volume_percent=fake.volume)
                     if st == 204:
@@ -236,9 +254,14 @@ class StoreTests(Base):
 
 
 class ClientTests(Base):
-    def client(self):
+    def load(self):
         self.login_file()
-        return api.Client(api.load_store(self.path), self.path, self.fake.api, self.fake.accounts)
+        return api.load_store(self.path)
+
+    def client(self):
+        c = api.Client(self.load(), self.path, self.fake.api, self.fake.accounts)
+        self.addCleanup(c.close)
+        return c
 
     def test_refresh_and_player(self):
         c = self.client()
@@ -247,6 +270,56 @@ class ClientTests(Base):
         self.assertEqual(self.fake.token_calls[0]["grant_type"], "refresh_token")
         self.assertEqual(self.fake.token_calls[0]["client_id"], CID)
         self.assertNotIn("client_secret", self.fake.token_calls[0])
+        self.assertEqual(self.fake.get_queries, ["market=from_token"])  # smaller answer
+
+    def test_one_kept_open_connection(self):
+        c = self.client()
+        self.addCleanup(c.close)
+        c.player()
+        n = self.fake.connections                  # the token call has its own
+        for _ in range(5):
+            c.player()
+        c.set_volume(40, "dev-pc")
+        self.assertEqual(self.fake.connections, n)
+        self.assertEqual(self.fake.puts, [(40, "dev-pc")])
+
+    def test_server_closed_idle_connection_retried(self):
+        c = self.client()
+        self.addCleanup(c.close)
+        c.player()
+        self.fake.hang_up = True                   # closes after each answer, silently
+        for _ in range(3):
+            time.sleep(0.05)
+            self.assertIsNotNone(c.player())
+        self.assertEqual(self.fake.gets, 4)
+
+    def test_stuck_connection_not_reused(self):
+        c = api.Client(self.load(), self.path, self.fake.api, self.fake.accounts, timeout=0.3)
+        self.addCleanup(c.close)
+        c.player()
+        self.fake.delay = 1.0
+        with self.assertRaises(api.ApiError):
+            c.player()
+        self.fake.delay = 0.0
+        self.assertIsNotNone(c.player())           # on a new connection
+
+    def test_redirect_not_followed(self):
+        c = self.client()
+        self.addCleanup(c.close)
+        c.player()
+        self.fake.redirect = True
+        with self.assertRaises(api.ApiError) as e:
+            c.player()
+        self.assertIn("HTTP 302", e.exception.reason)
+
+    def test_proxy_users_keep_urllib(self):
+        with mock.patch("urllib.request.getproxies", return_value={"https": "http://proxy:8080"}), \
+                mock.patch("urllib.request.proxy_bypass", return_value=False):
+            link = api._Link("https://api.spotify.com/v1")
+        self.assertIsNotNone(link.fallback)       # urllib knows the proxy settings
+        with mock.patch("urllib.request.getproxies", return_value={}):
+            self.assertIsNone(api._Link("https://api.spotify.com/v1").fallback)
+        self.assertIsNone(api._Link(self.fake.api).fallback)  # 127.0.0.1: never a proxy
 
     def test_401_refreshes_and_retries(self):
         c = self.client()
@@ -263,7 +336,7 @@ class ClientTests(Base):
 
     def test_errors(self):
         c = self.client()
-        for status, part in ((403, "Premium"), (404, "no active device"), (429, "slow down"),
+        for status, part in ((403, "Premium"), (404, "isn't playing anywhere"), (429, "slow down"),
                              (500, "HTTP 500")):
             self.fake.player_status = status
             with self.assertRaises(api.ApiError) as e:
@@ -356,7 +429,7 @@ class VolumeTests(Base):
         self.assertTrue(wait_for(v.usable))
         self.assertAlmostEqual(v.level(), 0.5)
         self.assertTrue(self.changes)
-        self.assertEqual(sum("own volume bar" in m for m in self.logs), 1)
+        self.assertEqual(sum("own slider" in m for m in self.logs), 1)
 
     def test_clicks_bundled_rounded_and_device_id(self):
         v = self.make()
@@ -475,6 +548,7 @@ class VolumeTests(Base):
         self.assertTrue(wait_for(lambda: not v.usable()))
         self.assertEqual(sum("slow down; using the Windows mixer" in m for m in self.logs), 1)
 
+    @mock.patch.object(api, "REREAD_AFTER", 0.5)   # same rule, shorter wait
     def test_moved_in_spotify_is_picked_up(self):
         v = self.make()
         v.set_present(True)
@@ -501,9 +575,29 @@ class VolumeTests(Base):
         self.assertTrue(wait_for(lambda: self.fake.puts))
         self.assertEqual(self.fake.puts[0][1], "dev-pc")
 
+    def test_old_saved_device_id_replaced(self):
+        v = self.make(device_id="old-id")          # Spotify now calls this PC "dev-pc"
+        v.set_present(True)
+        self.assertTrue(wait_for(v.usable))
+        v.step(0.013)
+        self.assertTrue(wait_for(lambda: self.fake.puts))
+        self.assertEqual(self.fake.puts[0][1], "dev-pc")
+        self.assertEqual(api.load_store(self.path)["device_id"], "dev-pc")
+        self.assertEqual(self.fake.token_calls[1:], [])  # our own save is no new login
+
+    def test_click_after_fallback_not_sent(self):
+        v = self.make()
+        v.set_present(True)
+        self.assertTrue(wait_for(v.usable))
+        v._set_state(False, "test fallback")       # e.g. the worker just fell back
+        self.assertIsNone(v.step(0.013))
+        self.assertIsNone(v.set_to(0.5))
+        time.sleep(0.2)
+        self.assertEqual(self.fake.puts, [])
+
     def test_fallbacks_log_once(self):
-        for status, part in ((403, "Premium"), (404, "no active device"), (429, "slow down"),
-                             (204, "no active device")):
+        for status, part in ((403, "Premium"), (404, "isn't playing anywhere"), (429, "slow down"),
+                             (204, "isn't playing anywhere")):
             with self.subTest(status):
                 self.logs.clear()
                 self.fake.player_status = status
@@ -536,6 +630,7 @@ class VolumeTests(Base):
         self.assertTrue(wait_for(lambda: any("offline" in m for m in self.logs)))
         self.assertFalse(v.usable())
 
+    @mock.patch.object(api, "RELOAD_CHECK", 0.3)
     def test_new_login_picked_up_without_restart(self):
         v = self.make(login=False)
         v.set_present(True)
@@ -612,7 +707,7 @@ class LoginTests(Base):
         finally:
             s.close()
         self.assertIsNone(code)
-        self.assertIn("in use", why)
+        self.assertIn("another program is using", why)
 
     def run_login(self, client_id=CID, answer=True):
         port = free_port()
@@ -702,6 +797,12 @@ class FakeSpotifyVolume:
     def set_present(self, present):
         self.present = present
 
+    def set_to(self, level):
+        if not self._usable:
+            return None
+        self._level = level
+        return level
+
 
 class ControllerTests(unittest.TestCase):
     def setUp(self):
@@ -754,6 +855,7 @@ class ControllerTests(unittest.TestCase):
         self.assertAlmostEqual(self.shown[-1][0].level, 0.9)
 
     def test_max_shown_when_turned_up_at_100(self):
+        self.spotify._volume = 1.0                 # mixer full too (see the test below)
         self.web._level = 0.99
         self.ctl.handle("up")                      # reaches 100 %: shows the percent
         self.assertFalse(self.shown[-1][0].at_max)
@@ -772,6 +874,37 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(self.shown[-1][0].at_max)
         self.assertEqual(self.spotify._volume, 1.0)
 
+    def test_full_slider_raises_a_lowered_mixer(self):
+        step = settings()["step"]
+        self.web._level = 1.0                      # Spotify's own slider full, mixer at 70 %
+        self.ctl.handle("up")
+        self.assertEqual(self.web.steps, [])
+        self.assertAlmostEqual(self.spotify._volume, 0.7 + step)
+        self.assertFalse(self.shown[-1][0].at_max)  # not "Max" while the mixer isn't full
+        self.spotify._volume = 1.0
+        self.ctl.handle("up")
+        self.assertTrue(self.shown[-1][0].at_max)
+        self.assertEqual(self.web.steps, [step])   # both full: the slider (stays at 100 %)
+
+    def test_tray_level_raises_a_lowered_mixer(self):
+        self.web._level, self.spotify._volume = 1.0, 0.4
+        self.ctl.press(("set", 1.0))
+        self.ctl.on_event(self.ctl.keys.get_nowait())
+        self.assertEqual((self.web._level, self.spotify._volume), (1.0, 1.0))
+        self.spotify._volume = 0.4
+        self.ctl.set_level(0.5)                    # the slider gets the level, mixer full
+        self.assertEqual((self.web._level, self.spotify._volume), (0.5, 1.0))
+
+    def test_slider_below_full_leaves_the_mixer(self):
+        self.web._level = 0.6
+        self.ctl.handle("up")
+        self.ctl.handle("down")
+        self.assertEqual(self.spotify._volume, 0.7)
+        self.web._level = 1.0
+        self.ctl.handle("down")                    # down always moves the slider
+        self.assertEqual(self.spotify._volume, 0.7)
+        self.assertEqual(len(self.web.steps), 3)
+
     def test_without_spotify_object_unchanged(self):
         ctl = Controller(settings(), lambda: self.audio, self.bridge, clock=self.clock,
                          process_lister=ProcessList())
@@ -779,6 +912,26 @@ class ControllerTests(unittest.TestCase):
         ctl.poll()
         ctl.handle("down")
         self.assertAlmostEqual(self.spotify._volume, 0.7 - settings()["step"])
+
+
+class LazyImportTests(unittest.TestCase):
+    def test_no_web_libraries_without_login(self):
+        """Without a login the program never loads urllib / http.client / ssl."""
+        import subprocess
+        import sys
+        code_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with tempfile.TemporaryDirectory(prefix="knob_lazy_test_") as tmp:
+            script = ("import sys, knob.app, knob.ui, knob.controller, knob.spotify_api as a\n"
+                      "v = a.SpotifyVolume(path=sys.argv[1]); v.set_present(True); v._work(0.0)\n"
+                      "print(sorted(m for m in sys.modules\n"
+                      "             if m.split('.')[0] in ('urllib', 'http', 'ssl')))\n")
+            env = dict(os.environ, VOLUME_KNOB_DATA=tmp)
+            out = subprocess.run([sys.executable, "-E", "-s", "-c", script,
+                                  os.path.join(tmp, api.STORE_NAME)],
+                                 cwd=code_dir, env=env, capture_output=True, text=True,
+                                 timeout=60, creationflags=0x08000000)  # CREATE_NO_WINDOW
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(out.stdout.strip(), "[]")
 
 
 class ConfigTests(unittest.TestCase):

@@ -67,8 +67,8 @@ class ValueLogicTests(unittest.TestCase):
                     self.assertEqual(config.validate({row["key"]: v})[1], [], (row["key"], v))
 
     def test_labels(self):
-        self.assertEqual(sw.pct(0.013), "1.3 %")
-        self.assertEqual(sw.pct(0.5), "50 %")
+        self.assertEqual(sw.pct(0.013), "1.3%")
+        self.assertEqual(sw.pct(0.5), "50%")
         self.assertEqual(sw.secs(1.5), "1.5 s")
         self.assertEqual(sw.secs(2.0), "2 s")
 
@@ -77,7 +77,7 @@ class ValueLogicTests(unittest.TestCase):
         self.assertEqual([v for v, _ in sw.options_for(row, 1.5)], [1.0, 1.25, 1.5])
         opts = sw.options_for(row, 1.4)
         self.assertEqual([v for v, _ in opts], [1.0, 1.25, 1.4, 1.5])
-        self.assertEqual(opts[2][1], "140 %")
+        self.assertEqual(opts[2][1], "140%")
 
     def test_stepper_next(self):
         self.assertEqual(sw.stepper_next(sw.STEPS, 0.013, 1), 0.015)
@@ -240,6 +240,7 @@ class SaveTests(TempFolder):
 def click(win, name, part):
     x, y, w, h = next(r for n, p, r in win.lay.targets if (n, p) == (name, part))
     cx, cy = int(x + w / 2), int(y + h / 2)
+    user32.SendMessageW(win.hwnd, sw.WM_LBUTTONDOWN, 1, (cy << 16) | cx)
     return user32.SendMessageW(win.hwnd, sw.WM_LBUTTONUP, 0, (cy << 16) | cx)
 
 
@@ -281,6 +282,18 @@ class WindowTests(TempFolder):
         self.assertEqual(user32.SendMessageW(win.hwnd, sw.WM_PAINT, 0, 0), 0)
         self.open()  # again: same window, brought to front
         self.assertEqual(len(self.shown), 2)
+
+    def test_release_without_press_changes_nothing(self):
+        win = self.open()
+        x, y, w, h = next(r for n, p, r in win.lay.targets if (n, p) == ("step", 1))
+        lp = (int(y + h / 2) << 16) | int(x + w / 2)
+        user32.SendMessageW(win.hwnd, sw.WM_LBUTTONUP, 0, lp)      # no press before it
+        x2, y2, w2, h2 = next(r for n, p, r in win.lay.targets if (n, p) == ("osd", "toggle"))
+        user32.SendMessageW(win.hwnd, sw.WM_LBUTTONDOWN, 1,
+                            (int(y2 + h2 / 2) << 16) | int(x2 + w2 / 2))
+        user32.SendMessageW(win.hwnd, sw.WM_LBUTTONUP, 0, lp)      # pressed elsewhere
+        self.assertEqual(self.changes, [])
+        self.assertFalse(os.path.exists(self.path))
 
     def test_click_saves_and_applies_live(self):
         win = self.open()

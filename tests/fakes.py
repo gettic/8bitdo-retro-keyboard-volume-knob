@@ -49,12 +49,14 @@ class FakeSession:
 
 
 class FakeAudio:
-    """sessions() hands out the same FakeSession objects every time."""
+    """sessions() hands out the same FakeSession objects every time; like
+    coreaudio.CoreAudio it owns them (released by reset() / close())."""
 
     def __init__(self, sessions):
         self.all = sessions
         self.closed = False
         self.calls = 0
+        self.resets = 0
 
     def sessions(self, apps=None):
         self.calls += 1
@@ -62,7 +64,13 @@ class FakeAudio:
             s.released = False
         return [s for s in self.all if apps is None or s.exe in apps]
 
+    def reset(self):
+        self.resets += 1
+        for s in self.all:
+            s.release()
+
     def close(self):
+        self.reset()
         self.closed = True
 
 

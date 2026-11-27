@@ -16,17 +16,16 @@ import base64
 import collections
 import ctypes
 import ctypes.wintypes as wt
-import http.client
 import json
 import logging
 import os
 import threading
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 
 from . import config
+
+# urllib / http.client / ssl are imported on the first network call only:
+# without a Spotify login they are never loaded (about 3 MB less memory).
 
 log = logging.getLogger("knob.spotify")
 
@@ -146,12 +145,14 @@ def delete_store(path):
 
 
 # ---------------------------------------------------------------- HTTP
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None  # a redirect becomes an HTTPError: tokens never follow it
-
-
 def _opener(base):
+    import urllib.parse
+    import urllib.request
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None  # a redirect becomes an HTTPError: tokens never follow it
+
     host = urllib.parse.urlsplit(base).hostname
     proxies = {} if host == "127.0.0.1" else None  # tests: never through a proxy
     return urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler(proxies))
@@ -162,6 +163,94 @@ class Response:
 
     def __init__(self, status, headers, data):
         self.status, self.headers, self.data = status, headers, data
+
+
+_ssl_context = None
+
+
+def _context():
+    global _ssl_context
+    if _ssl_context is None:
+        import ssl
+        _ssl_context = ssl.create_default_context()  # certificates and host names checked
+    return _ssl_context
+
+
+class _Link:
+    """One kept-open connection to one host (http.client), so polls and knob
+    clicks skip a new TCP + TLS handshake each time. Redirects are never
+    followed (http.client doesn't). A connection is only put back after a
+    complete answer; one still in use by a stuck call is never reused. A
+    broken kept-open connection (the server closed it while idle) is retried
+    once on a new one. With a proxy set in Windows, urllib is used instead
+    (it knows the proxy settings)."""
+
+    def __init__(self, base):
+        import urllib.parse
+        import urllib.request
+        u = urllib.parse.urlsplit(base)
+        self.scheme, self.host, self.port = u.scheme, u.hostname, u.port
+        self._lock = threading.Lock()
+        self._conn = None
+        self.fallback = None
+        if self.host != "127.0.0.1":
+            proxies = urllib.request.getproxies()
+            if proxies.get(self.scheme) and not urllib.request.proxy_bypass(self.host):
+                self.fallback = _opener(base)  # through the proxy, like before
+
+    def _new(self, timeout):
+        import http.client
+        if self.scheme == "https":
+            return http.client.HTTPSConnection(self.host, self.port, timeout=timeout,
+                                               context=_context())
+        return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+
+    def close(self):
+        with self._lock:
+            conn, self._conn = self._conn, None
+        if conn:
+            conn.close()
+
+    def request_now(self, method, url, headers, body, timeout):
+        """-> (status, headers, raw bytes). Raises OSError."""
+        import http.client
+        import urllib.parse
+        u = urllib.parse.urlsplit(url)
+        target = (u.path or "/") + ("?" + u.query if u.query else "")
+        for attempt in (1, 2):
+            with self._lock:
+                conn, self._conn = self._conn, None  # ours alone while this call runs
+            reused = conn is not None
+            if conn is None:
+                conn = self._new(timeout)
+            conn.timeout = timeout
+            if conn.sock is not None:
+                conn.sock.settimeout(timeout)
+            try:
+                conn.request(method, target, body=body, headers=headers or {})
+                r = conn.getresponse()
+                raw = r.read(MAX_BODY + 1)
+                status, hdrs = r.status, r.msg
+                keep = not r.will_close and len(raw) <= MAX_BODY and r.isclosed()
+            except (http.client.RemoteDisconnected, ConnectionResetError,
+                    ConnectionAbortedError, BrokenPipeError) as e:
+                conn.close()
+                if reused and attempt == 1:
+                    continue  # the idle connection was closed by the server: once more
+                raise OSError(str(e) or "connection closed") from None
+            except http.client.HTTPException:
+                conn.close()
+                raise OSError("broken answer") from None
+            except OSError:
+                conn.close()
+                raise
+            if keep:
+                with self._lock:
+                    if self._conn is None:
+                        self._conn, conn = conn, None
+            if conn is not None:
+                conn.close()
+            return status, hdrs, raw
 
 
 _stalled = []  # calls still stuck (e.g. a name lookup urllib's timeout doesn't cover)
@@ -192,7 +281,15 @@ def http_call(opener, method, url, headers=None, body=None, timeout=TIMEOUT):
 
 
 def _http_call_now(opener, method, url, headers=None, body=None, timeout=TIMEOUT):
-    req =urllib.request.Request(url, data=body, method=method, headers=headers or {})
+    if isinstance(opener, _Link):
+        if opener.fallback is None:
+            status, hdrs, raw = opener.request_now(method, url, headers, body, timeout)
+            return _response(status, hdrs, raw)
+        opener = opener.fallback
+    import http.client
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
     try:
         with opener.open(req, timeout=timeout) as r:
             raw = r.read(MAX_BODY + 1)
@@ -208,6 +305,10 @@ def _http_call_now(opener, method, url, headers=None, body=None, timeout=TIMEOUT
         raise OSError(str(getattr(e, "reason", "no connection"))) from None
     except http.client.HTTPException:
         raise OSError("broken answer") from None
+    return _response(status, hdrs, raw)
+
+
+def _response(status, hdrs, raw):
     data = None
     if raw and len(raw) <= MAX_BODY:
         try:
@@ -218,6 +319,7 @@ def _http_call_now(opener, method, url, headers=None, body=None, timeout=TIMEOUT
 
 
 def token_request(opener, accounts, fields, timeout=TIMEOUT):
+    import urllib.parse
     body = urllib.parse.urlencode(fields).encode("ascii")
     return http_call(opener, "POST", accounts + "/api/token",
                 {"Content-Type": "application/x-www-form-urlencoded"}, body, timeout)
@@ -249,10 +351,14 @@ class Client:
         self.api, self.accounts = api.rstrip("/"), accounts.rstrip("/")
         self.clock = clock
         self.timeout = timeout
-        self._api_opener = _opener(self.api)
-        self._acc_opener = _opener(self.accounts)
+        self._api_opener = _Link(self.api)       # kept open: polls and clicks
+        self._acc_opener = _opener(self.accounts)  # token refresh about once an hour
         self._token = None
         self._expires = 0.0
+
+    def close(self):
+        """Close the kept-open connection."""
+        self._api_opener.close()
 
     def refresh(self):
         try:
@@ -286,6 +392,7 @@ class Client:
         """-> Response for 2xx; raises ApiError otherwise."""
         url = self.api + path
         if query:
+            import urllib.parse
             url += "?" + urllib.parse.urlencode(query)
         for attempt in (1, 2):
             if self._token is None or self.clock() >= self._expires:
@@ -308,14 +415,15 @@ class Client:
         if r.status == 403:
             raise ApiError("Spotify refused volume control (Premium needed?)", wait=300)
         if r.status == 404:
-            raise ApiError("Spotify has no active device", wait=5)
+            raise ApiError("Spotify isn't playing anywhere right now", wait=5)
         if r.status == 429:
             raise ApiError("Spotify asked to slow down", _retry_after(r), slow=True)
         raise ApiError(f"Spotify answered HTTP {r.status}")
 
     def player(self):
         """Current playback dict, or None when nothing is active (204)."""
-        r = self.call("GET", "/me/player")
+        # market=from_token leaves out the long market lists of the track (smaller answer)
+        r = self.call("GET", "/me/player", {"market": "from_token"})
         return r.data if r.status == 200 and isinstance(r.data, dict) else None
 
     def devices(self):
@@ -403,6 +511,8 @@ class SpotifyVolume:
             self._cond.notify_all()
         if self._thread:
             self._thread.join(self.timeout * 2 + 1)
+        if self._client is not None and not (self._thread and self._thread.is_alive()):
+            self._client.close()
 
     def set_present(self, present):
         with self._cond:
@@ -425,6 +535,8 @@ class SpotifyVolume:
     def step(self, delta):
         """Queue a knob click. Returns the volume to show."""
         with self._cond:
+            if not self._ok:  # switched to the mixer since the caller checked usable()
+                return None
             self._pending += delta
             if self._known is not None:
                 base = self._base()
@@ -437,7 +549,7 @@ class SpotifyVolume:
         """Queue an exact volume (tray menu 25/50/75/100 %). Returns the volume
         to show, or None when Spotify's volume isn't known yet (nothing queued)."""
         with self._cond:
-            if self._known is None:
+            if self._known is None or not self._ok:
                 return None
             self._pending = _clamp(level) - self._base()
             self._cond.notify_all()
@@ -464,7 +576,7 @@ class SpotifyVolume:
                 self._pending = 0.0
         if changed:
             if ok:
-                log.info("Spotify volume: using Spotify's own volume bar")
+                log.info("Spotify volume: using Spotify's own slider")
             else:
                 log.info("Spotify volume: %s; using the Windows mixer", reason)
             self._changed()
@@ -484,6 +596,8 @@ class SpotifyVolume:
         self._mtime = mtime
         creds = load_store(self.path) if mtime is not None else None
         self._creds = creds
+        if self._client is not None:
+            self._client.close()
         self._client = (Client(creds, self.path, self.api, self.accounts, self.clock,
                                self.timeout) if creds else None)
         with self._cond:
@@ -512,15 +626,28 @@ class SpotifyVolume:
         dev = p.get("device") if p else None
         vol = dev.get("volume_percent") if isinstance(dev, dict) else None
         if not p:
-            self._fail(ApiError("Spotify has no active device", wait=0), now)
+            self._fail(ApiError("Spotify isn't playing anywhere right now", wait=0), now)
         elif not is_this_pc(dev, self._creds, self.pc_name):
             self._fail(ApiError("Spotify is playing on another device", wait=0), now)
         elif dev.get("supports_volume") is False or isinstance(vol, bool) or \
                 not isinstance(vol, (int, float)):
             self._fail(ApiError("this Spotify device has no volume control", wait=0), now)
         else:
-            if not self._creds.get("device_id") and isinstance(dev.get("id"), str):
-                self._creds["device_id"] = dev["id"]
+            did = dev.get("id")
+            if isinstance(did, str) and did and did != self._creds.get("device_id"):
+                # matched by name with a new id (Spotify reinstalled...): send to the new one
+                had = self._creds.get("device_id")
+                self._creds["device_id"] = did
+                if had:
+                    try:
+                        save_store(self.path, self._creds["client_id"],
+                                   self._creds["refresh_token"], did,
+                                   self._creds.get("device_name"))
+                        st = os.stat(self.path)  # our own write: no reload for it
+                        self._mtime = (st.st_mtime_ns, st.st_size)
+                        log.info("Spotify: this PC's Spotify app has a new device id; saved")
+                    except OSError:
+                        log.warning("could not save this PC's new Spotify device id")
             with self._cond:
                 old = self._known
                 self._known = _clamp(vol / 100.0)
@@ -597,6 +724,8 @@ class SpotifyVolume:
             while self._puts and now - self._puts[0] >= PUT_WINDOW:
                 self._puts.popleft()
             budget_left = len(self._puts) < PUT_BUDGET
+            if pending and not self._ok:  # clicks are the mixer's now
+                self._pending = pending = 0.0
         if not present or waiting:
             if pending and not (present and held):  # a held 429 keeps the clicks
                 with self._cond:

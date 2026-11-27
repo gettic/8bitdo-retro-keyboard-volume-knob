@@ -1,4 +1,5 @@
 """Controller + browser bridge with fake Core Audio, fake clock and fake browser link."""
+import logging
 import threading
 import unittest
 
@@ -124,6 +125,7 @@ class ControllerTests(unittest.TestCase):
         self.assertAlmostEqual(self.spotify._volume, 0.5 + STEP)
 
     def test_stale_host_falls_back(self):
+        self.brave._peak = 0.5  # the fallback only changes a Brave that plays
         connect_host(self.bridge, 1, [yt(7, playing=True)])
         self.clock.advance(6)
         self.tick()
@@ -159,6 +161,171 @@ class ControllerTests(unittest.TestCase):
         self.assertAlmostEqual(self.spotify._volume, 0.5 + 2 * STEP)
         self.assertTrue(self.audio.closed)
         self.assertTrue(self.spotify.released)
+
+    def test_sessions_kept_until_an_error(self):
+        self.tick()
+        for _ in range(3):
+            self.clock.advance(2.0)
+            self.tick()                              # normal 2 s refreshes
+        self.assertEqual(self.audio.resets, 0)
+        self.assertFalse(self.spotify.released)      # the audio object owns them
+        self.spotify.fail = True
+        self.ctl.handle("up")                        # a session call fails ...
+        self.spotify.fail = False
+        self.tick()                                  # ... so the next refresh starts clean
+        self.assertEqual(self.audio.resets, 1)
+        self.clock.advance(2.0)
+        self.tick()
+        self.assertEqual(self.audio.resets, 1)
+
+    def test_tab_delta_never_over_0_2(self):
+        connect_host(self.bridge, 1, [yt(7, playing=True)])
+        self.tick()
+        for _ in range(300):                        # a very fast spin: one command per click
+            self.ctl.handle("up")
+        vols = [m for _, m in self.rec.sent if m["type"] == "volume"]
+        self.assertEqual(len(vols), 300)
+        self.assertTrue(all(abs(m["delta"]) <= 0.2 for m in vols))
+        self.ctl.settings = settings(step=0.5)      # even a hand-broken step is capped
+        self.ctl.handle("down")
+        self.assertEqual(self.rec.sent[-1][1]["delta"], -0.2)
+
+    # --- the Brave fallback leaves nothing behind (v1.5.2) ---
+    def test_idle_brave_not_changed_when_nothing_plays(self):
+        self.tick()
+        self.ctl.handle("down")
+        self.ctl.handle("mute")
+        self.assertEqual((self.brave._volume, self.brave._muted), (0.8, False))
+        self.assertTrue(self.spotify._muted)
+
+    def test_fallback_change_put_back_when_extension_connects(self):
+        self.brave._peak = 0.5
+        self.tick()
+        self.ctl.handle("down")
+        self.ctl.handle("mute")
+        self.assertTrue(self.brave._muted)
+        self.assertAlmostEqual(self.brave._volume, 0.8 - STEP)
+        connect_host(self.bridge, 1, [yt(7)])
+        self.tick()
+        self.assertEqual((self.brave._volume, self.brave._muted), (0.8, False))
+        self.brave._volume = 0.3                    # changed by hand later: left alone
+        self.tick()
+        self.assertEqual(self.brave._volume, 0.3)
+
+    def test_brave_never_touched_by_knob_nothing_to_put_back(self):
+        connect_host(self.bridge, 1, [yt(7)])
+        self.brave._volume = 0.4
+        self.tick()
+        self.assertEqual(self.brave._volume, 0.4)
+        self.assertEqual(self.ctl._brave_orig, {})
+
+    def test_closed_brave_forgotten(self):
+        self.brave._peak = 0.5
+        self.tick()
+        self.ctl.handle("down")
+        self.audio.all.remove(self.brave)
+        self.ctl.refresh(force=True)
+        self.assertEqual(self.ctl._brave_orig, {})
+
+    # --- Mute / 0 % keep their target (v1.5.2) ---
+    def silence(self, session):
+        """A muted / 0 % app makes no sound: its meter reads 0."""
+        session._peak = 0.0
+        self.clock.advance(2.0)  # past hold_seconds
+        connect_host(self.bridge, 1, [yt(7)])
+        self.tick()
+
+    def test_second_mute_unmutes_the_muted_app_only(self):
+        connect_host(self.bridge, 1, [yt(7)])
+        self.spotify._peak = 0.3
+        self.tick()
+        self.ctl.handle("mute")
+        self.assertTrue(self.spotify._muted)
+        self.silence(self.spotify)
+        self.ctl.handle("mute")
+        self.assertFalse(self.spotify._muted)
+        self.assertEqual({m["type"] for _, m in self.rec.sent}, {"hello"})  # tab untouched
+
+    def test_turned_to_zero_stays_the_target(self):
+        connect_host(self.bridge, 1, [yt(7)])
+        self.spotify._peak = 0.3
+        self.spotify._volume = STEP / 2
+        self.tick()
+        self.ctl.handle("down")
+        self.assertEqual(self.spotify._volume, 0.0)
+        self.silence(self.spotify)
+        self.ctl.handle("up")
+        self.assertAlmostEqual(self.spotify._volume, STEP)
+        self.assertEqual({m["type"] for _, m in self.rec.sent}, {"hello"})
+
+    def test_quiet_app_dropped_when_something_else_plays(self):
+        self.spotify._peak = 0.3
+        self.tick()
+        self.ctl.handle("mute")
+        self.silence(self.spotify)
+        connect_host(self.bridge, 1, [yt(7, playing=True)])
+        self.ctl.handle("up")
+        self.assertTrue(self.spotify._muted)        # a turn for the video doesn't unmute it
+        self.assertEqual(self.rec.sent[-1][1]["type"], "volume")
+
+    def test_mute_all_then_unmute_all(self):
+        connect_host(self.bridge, 1, [yt(7)])
+        self.tick()
+        self.ctl.handle("mute")                     # nothing played: everything muted
+        connect_host(self.bridge, 1, [yt(7, muted=True)])
+        self.clock.advance(2.0)
+        self.tick()
+        self.ctl.handle("mute")                     # and everything unmuted again
+        self.assertFalse(self.spotify._muted)
+        self.assertEqual(self.rec.sent[-1][1], {"type": "mute", "muted": False, "tabs": [7]})
+
+    # --- Windows audio not answering (v1.5.2) ---
+    def test_audio_failure_keys_still_reach_tabs(self):
+        logs = []
+        handler = logging.Handler()
+        handler.emit = lambda r: logs.append(r)
+        lg = logging.getLogger("knob.controller")
+        lg.addHandler(handler)
+        self.addCleanup(lg.removeHandler, handler)
+        self.addCleanup(lg.setLevel, lg.level)
+        lg.setLevel(logging.DEBUG)
+
+        def broken(apps=None):
+            self.audio.calls += 1
+            raise OSError("audio service restarting")
+        good = self.audio.sessions
+        self.audio.sessions = broken
+        connect_host(self.bridge, 1, [yt(7, playing=True)])
+        self.ctl._refreshed = None
+        for _ in range(10):
+            self.tick()
+            self.clock.advance(0.2)
+        self.assertEqual(self.audio.calls, 1)  # retried on the 2 s refresh only
+        self.ctl.handle("up")
+        self.assertEqual(self.rec.sent[-1][1]["type"], "volume")
+        self.clock.advance(0.2)
+        connect_host(self.bridge, 1, [yt(7, playing=True)])
+        self.tick()
+        self.assertEqual(self.audio.calls, 2)
+        self.assertEqual(sum(r.levelname == "WARNING" for r in logs), 1)
+        self.audio.sessions = good
+        self.clock.advance(2.0)
+        self.tick()
+        self.assertTrue(any("available again" in r.getMessage() for r in logs))
+        self.assertTrue(self.ctl._sessions)
+
+    def test_run_handles_key_when_poll_fails(self):
+        connect_host(self.bridge, 1, [yt(7, playing=True)])
+        self.ctl.poll = lambda: (_ for _ in ()).throw(RuntimeError("poll broke"))
+        lg = logging.getLogger("knob.controller")
+        lg.disabled = True
+        self.addCleanup(setattr, lg, "disabled", False)
+        t = threading.Thread(target=self.ctl.run)
+        t.start()
+        self.ctl.press("up")
+        self.ctl.stop()
+        t.join(5)
+        self.assertEqual(self.rec.sent[-1][1]["type"], "volume")
 
 
 def boosted(tid, volume=1.3, site="youtube", boost="on", max_volume=1.5):

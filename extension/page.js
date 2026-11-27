@@ -46,12 +46,66 @@
     return site === "ytmusic" ? document.querySelector("ytmusic-player-bar #volume-slider") : null;
   }
 
+  // YouTube Music: if moving its slider stops changing the sound (YTM changed
+  // the element), read and set the player volume directly for the rest of
+  // this page instead (a different loudness curve, but the knob keeps working).
+  // "Not answering" = the slider moved at least YTM_STUCK_POINTS away from where
+  // the sound last changed, while the sound stayed the same. (Single steps can
+  // map to the same player volume on YTM's curve, mostly near the bottom, so
+  // one unchanged step proves nothing; below YTM_MIN_SLIDER it is never judged.)
+  let ytmDirect = false;
+  let ytmAnchor = null;   // { slider, loud } where the sound last changed
+  let ytmChecking = false;
+  const YTM_CHECK_MS = 250;
+  const YTM_STUCK_POINTS = 6;
+  const YTM_MIN_SLIDER = 15;
+
+  function ytmControl() {
+    return ytmDirect ? null : ytmSlider();
+  }
+
+  function playerLoudness(p) {
+    const v = playerVideo(p);
+    return [Number(p.getVolume()), v ? Number(v.volume) : NaN];
+  }
+
+  function sameLoudness(a, b) {
+    const same = (x, y) => x === y || (Number.isNaN(x) && Number.isNaN(y));
+    return same(a[0], b[0]) && same(a[1], b[1]);
+  }
+
+  // Called before each slider move (with the slider and sound before it).
+  function noteYtmBefore(sliderBefore, loudBefore) {
+    if (!ytmAnchor || !sameLoudness(ytmAnchor.loud, loudBefore)) {
+      ytmAnchor = { slider: sliderBefore, loud: loudBefore };
+    }
+  }
+
+  function checkYtmSlider(p, s) {
+    if (ytmChecking) return;
+    ytmChecking = true;
+    setTimeout(() => {
+      ytmChecking = false;
+      try {
+        const now = playerLoudness(p);
+        const slider = Number(s.value);
+        if (!ytmAnchor || !sameLoudness(now, ytmAnchor.loud)) {
+          ytmAnchor = { slider, loud: now }; // the sound follows the slider
+        } else if (Math.abs(slider - ytmAnchor.slider) >= YTM_STUCK_POINTS && slider >= YTM_MIN_SLIDER) {
+          ytmDirect = true;
+          console.info("Volume knob: YouTube Music slider not answering, using the player volume");
+          schedule();
+        }
+      } catch (e) { /* player gone: check again next time */ }
+    }, YTM_CHECK_MS);
+  }
+
   // The volume as the page's own slider shows it, 0-100. On YouTube that is the
   // player volume. On YouTube Music the player-bar slider maps to the player
   // volume on a curve (slider 96 -> player 89 in the live test), so the slider
   // is the value that matches what the user sees.
   function sliderValue(p) {
-    const s = ytmSlider();
+    const s = ytmControl();
     if (s) {
       const n = Number(s.value);
       if (Number.isFinite(n)) return n;
@@ -95,7 +149,9 @@
     g.connect(dry).connect(ctx.destination);
     g.connect(comp).connect(wet).connect(ctx.destination);
     ctx.onstatechange = () => {
-      if (ctx.state !== "running" && ctx.state !== "closed" && anyRouted()) {
+      if (ctx.state === "running") {
+        audioBack(); // came back (e.g. after sleep)
+      } else if (ctx.state !== "running" && ctx.state !== "closed" && anyRouted()) {
         ctx.resume().catch(() => {});
         setTimeout(() => {
           if (ctx.state !== "running") { boost.status = "error"; schedule(); }
@@ -186,6 +242,31 @@
     return starting;
   }
 
+  // A routed tab plays only through the context: if it stopped (sleep, output
+  // device change), try again on play, on showing the tab and on knob clicks.
+  // Resolves true if the sound path works (or was never routed).
+  // The context runs again with a routed video: the boost works again
+  // ("blocked" here came from a boost step tried while it was stuck).
+  function audioBack() {
+    if (anyRouted() && (boost.status === "error" || boost.status === "blocked")) {
+      boost.status = boost.gain > 1 ? "on" : "off";
+      schedule();
+    }
+  }
+
+  function wakeAudio() {
+    const ctx = boost.ctx;
+    if (!ctx || !anyRouted() || ctx.state === "running") return Promise.resolve(true);
+    if (ctx.state === "closed") return Promise.resolve(false);
+    return Promise.race([
+      ctx.resume().catch(() => {}),
+      new Promise((r) => setTimeout(r, 300)),
+    ]).then(() => {
+      if (ctx.state === "running") audioBack();
+      return ctx.state === "running";
+    });
+  }
+
   function setBoostGain(g) {
     boost.gain = Math.min(HARD_MAX / 100, Math.max(1, g));
     boost.status = boost.gain > 1 ? "on" : (boost.status === "on" ? "off" : boost.status);
@@ -232,12 +313,15 @@
 
   function setSlider(p, percent) {
     percent = Math.round(Math.min(100, Math.max(0, percent)));
-    const s = ytmSlider();
+    const s = ytmControl();
     if (s) {
-      // No fallback to p.setVolume here: the player uses a different scale on
-      // YTM, so a direct call would jump the sound to a different loudness.
+      // The player uses a different scale on YTM, so p.setVolume is only the
+      // fallback once the slider is known not to work (checkYtmSlider).
       if (Number(s.value) !== percent) {
-        try { setYtmSlider(s, percent); } catch (e) { /* slider changed shape: no change */ }
+        let checked = false;
+        try { noteYtmBefore(Number(s.value), playerLoudness(p)); checked = true; } catch (e) { /* no reading */ }
+        try { setYtmSlider(s, percent); } catch (e) { /* slider changed shape */ }
+        if (checked) checkYtmSlider(p, s);
       }
       return;
     }
@@ -342,8 +426,8 @@
     (document.head || document.documentElement).appendChild(st);
   }
 
-  // percent: effective volume 0-150, or null for "Muted".
-  function showBox(p, percent) {
+  // percent: effective volume 0-150, or null for "Muted"; label: text instead.
+  function showBox(p, percent, label) {
     try {
       const host = boxHost(p);
       if (!host) return;
@@ -357,9 +441,9 @@
       boxEl.classList.toggle("vk8bitdo-above", host.above);
       while (boxEl.firstChild) boxEl.removeChild(boxEl.firstChild);
       const num = document.createElement("span");
-      num.textContent = percent === null ? "Muted" : Math.round(percent) + "%";
+      num.textContent = label ? label : (percent === null ? "Muted" : Math.round(percent) + "%");
       boxEl.appendChild(num);
-      if (percent !== null && percent > 100) {
+      if (!label && percent !== null && percent > 100) {
         const bar = document.createElement("span");
         bar.className = "vk8bitdo-bar";
         const fill = document.createElement("i");
@@ -534,9 +618,27 @@
     chain = chain.then(() => applyNow(cmd)).catch(() => {}).then(() => schedule());
   }
 
+  const RELOAD_HINT = "Reload tab";
+  const RELOAD_HINT_MS = 10000;
+  let reloadHintAt = -Infinity;
+
   async function applyNow(cmd) {
     const p = findPlayer();
     if (!p) return;
+    if (cmd.type !== "probe" && !(await wakeAudio())) {
+      // The boosted sound path is stuck: say so on a knob click (not too often).
+      if (cmd.type !== "set_volume" && Date.now() - reloadHintAt >= RELOAD_HINT_MS) {
+        reloadHintAt = Date.now();
+        hideBubble();
+        showBox(p, null, RELOAD_HINT);
+        await applyCommand(p, cmd, false);
+        return;
+      }
+    }
+    await applyCommand(p, cmd, true);
+  }
+
+  async function applyCommand(p, cmd, indicate) {
     if (cmd.type === "volume") {
       const shown = effectivePercent(p);
       if (!Number.isFinite(shown)) return;
@@ -554,7 +656,7 @@
       await setEffective(p, target);
       exact = target;
       rememberVolume(p);
-      showIndicator(p, effectivePercent(p));
+      if (indicate) showIndicator(p, effectivePercent(p));
     } else if (cmd.type === "set_volume") {
       exact = null;
       // Exact, and mute is left alone (used by the program's failsafe).
@@ -565,7 +667,7 @@
       const target = typeof cmd.muted === "boolean" ? cmd.muted : !isMuted;
       setMuted(p, target);
       rememberVolume(p);
-      showIndicator(p, target ? null : effectivePercent(p));
+      if (indicate) showIndicator(p, target ? null : effectivePercent(p));
     } else if (cmd.type === "probe") {
       // Used by the tests only: report what the page's own controls show.
       const s = ytmSlider();
@@ -625,8 +727,12 @@
   function onVideoEvent(e) {
     // A boosted tab: a video that starts playing gets routed too.
     if (boost.gain > 1 && (e.type === "play" || e.type === "playing")) routeVideo(e.target);
+    if (e.type === "play" || e.type === "playing") wakeAudio();
     schedule();
   }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") wakeAudio();
+  });
   function watch() {
     const p = findPlayer();
     const v = playerVideo(p) || document.querySelector("video");

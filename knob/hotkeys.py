@@ -27,9 +27,10 @@ user32.RegisterHotKey.argtypes = (wt.HWND, ctypes.c_int, wt.UINT, wt.UINT)
 user32.RegisterHotKey.restype = wt.BOOL
 user32.UnregisterHotKey.argtypes = (wt.HWND, ctypes.c_int)
 user32.UnregisterHotKey.restype = wt.BOOL
-user32.MsgWaitForMultipleObjects.argtypes = (wt.DWORD, ctypes.POINTER(wt.HANDLE), wt.BOOL,
-                                             wt.DWORD, wt.DWORD)
-user32.MsgWaitForMultipleObjects.restype = wt.DWORD
+MWMO_INPUTAVAILABLE = 0x0004  # also wake for messages already in the queue (after a modal loop)
+user32.MsgWaitForMultipleObjectsEx.argtypes = (wt.DWORD, ctypes.POINTER(wt.HANDLE), wt.DWORD,
+                                               wt.DWORD, wt.DWORD)
+user32.MsgWaitForMultipleObjectsEx.restype = wt.DWORD
 user32.PeekMessageW.argtypes = (ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT, wt.UINT)
 user32.PeekMessageW.restype = wt.BOOL
 user32.PostThreadMessageW.argtypes = (wt.DWORD, wt.UINT, wt.WPARAM, wt.LPARAM)
@@ -141,7 +142,8 @@ def run_loop(on_key, stop_event, max_keys=None, retry=RETRY_SECONDS, hwnd=None,
         while True:
             waiting = not st.registered and not st.paused
             timeout = int(retry * 1000) if waiting else INFINITE
-            r = user32.MsgWaitForMultipleObjects(1, handles, False, timeout, QS_ALLINPUT)
+            r = user32.MsgWaitForMultipleObjectsEx(1, handles, timeout, QS_ALLINPUT,
+                                                   MWMO_INPUTAVAILABLE)
             if r == WAIT_OBJECT_0:
                 return seen
             if not st.registered and not st.paused:

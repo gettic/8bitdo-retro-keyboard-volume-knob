@@ -1,1 +1,1 @@
-"""8BitDo Retro Keyboard volume knob: background program."""
+"""8BitDo Volume Knob: background program."""

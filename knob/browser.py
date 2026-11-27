@@ -70,7 +70,7 @@ class BrowserBridge:
         self._lock = threading.Lock()
 
     def on_connect(self, client):
-        log.info("browser host %s connected", client)
+        log.info("Brave tab link %s connected", client)
 
     def on_disconnect(self, client):
         with self._lock:
@@ -78,7 +78,7 @@ class BrowserBridge:
         self.state.drop(client)
         if self.events:
             self.events(("gone", client))
-        log.info("browser host %s disconnected", client)
+        log.info("Brave tab link %s disconnected", client)
 
     def on_message(self, client, msg):
         kind = msg.get("type")
@@ -89,7 +89,7 @@ class BrowserBridge:
                 if self.send:
                     self.send(client, protocol.hello())
             else:
-                log.warning("browser host %s speaks an unknown protocol; ignored", client)
+                log.warning("Brave tab link %s speaks an unknown protocol; ignored", client)
             return
         with self._lock:
             ok = client in self._features

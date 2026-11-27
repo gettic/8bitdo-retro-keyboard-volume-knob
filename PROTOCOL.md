@@ -69,20 +69,21 @@ Change volume (knob):
 {"type":"volume","tabs":[123,456],"delta":0.04,"max":1.5}
 ```
 
+- `delta` is at most 0.2 either way (`|delta| <= 0.2`, the largest `step` setting); the program never sends more and the host clamps a larger one to ±0.2. The program sends one `volume` per knob click and never bundles clicks for tabs, so a fast spin is many small commands, not one big one (the builder `protocol.volume()` also caps `delta` at ±0.2).
 - The host computes `new = old + delta` on the effective volume.
 - **Crossing 100 %:** if `old < 1.0 < new` or `old > 1.0 > new`, then `new = 1.0` (the knob always stops on 100 % once).
 - Then the host clamps `new` to `[0, max]` and to what the tab can do (`max_volume`; a blocked tab retries the boost here). Missing `max` = 1.0 (no boost).
 - Applying a delta unmutes the tab.
 - The program sends `max` = its `boost_max` setting (1.0-1.5) to hosts with `"boost"`, except for tabs whose `boost` is `"unavailable"` (those get 1.0). Hosts without `"boost"` always get 1.0.
 
-Set volume (failsafe):
+Set volume (loud-tab guard, taskbar menu 25/50/75/100 %):
 
 ```json
 {"type":"set_volume","tabs":[123],"volume":0.5}
 ```
 
-- Absolute effective volume, clamped to `[0, 1.5]` and the tab's ability. At 1.0 or below the gain goes back to 1.0 first, then the slider moves. **Mute is not changed.**
-- The program sends it only when a tab is **over 1.0** at program start or when it opens while nothing else is open (see the program's failsafe), and only to hosts with `"set_volume"`.
+- Absolute effective volume, clamped to `[0, 1.0]` (never a boost) and the tab's ability. The gain goes back to 1.0 first, then the slider moves. **Mute is not changed** (the program sends a separate `mute` false first when it wants the tab unmuted).
+- The program sends it when a tab is **over 1.0** at program start or when it opens while nothing else is open (the loud-tab guard), and for the taskbar menu's 25/50/75/100 % row; only to hosts with `"set_volume"`.
 
 Mute / unmute:
 

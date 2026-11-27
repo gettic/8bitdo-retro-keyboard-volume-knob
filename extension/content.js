@@ -11,6 +11,8 @@
   let retry = 0;
   let retryTimer = 0;
   const BACKOFF = [1000, 2000, 5000, 10000, 30000];
+  const PROBE_MS = 2000; // a probe answer from the page counts only this long after a probe
+  let probeUntil = 0;
 
   function toPage(cmd) {
     document.dispatchEvent(new CustomEvent(TO_PAGE, { detail: JSON.stringify(cmd) }));
@@ -69,6 +71,7 @@
         if (typeof cmd.muted === "boolean") c.muted = cmd.muted;
         toPage(c);
       } else if (cmd.type === "probe") {
+        probeUntil = Date.now() + PROBE_MS;
         toPage({ type: "probe" });
       }
     });
@@ -84,7 +87,7 @@
   }
 
   function reconnectSoon() {
-    if (retryTimer || document.visibilityState === "prerender") return;
+    if (retryTimer || document.prerendering) return; // prerenderingchange connects
     const wait = BACKOFF[Math.min(retry, BACKOFF.length - 1)];
     retry += 1;
     retryTimer = setTimeout(connect, wait);
@@ -95,6 +98,8 @@
     try { msg = JSON.parse(String(e.detail)); } catch (err) { return; }
     if (!msg || typeof msg !== "object") return;
     if (msg.probe === true) {
+      if (Date.now() > probeUntil) return; // not asked for: page scripts can't use this pipe
+      probeUntil = 0;
       post({
         type: "probe",
         ytSlider: msg.ytSlider == null ? null : String(msg.ytSlider).slice(0, 16),
@@ -118,5 +123,8 @@
   });
 
   lastState = undefined;
-  connect();
+  // A prerendered page (address-bar prerender) is not a tab's main frame yet:
+  // the worker would refuse it, so connect once it is shown.
+  document.addEventListener("prerenderingchange", () => connect(), { once: true });
+  if (!document.prerendering) connect();
 })();

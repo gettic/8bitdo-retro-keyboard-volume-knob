@@ -78,8 +78,12 @@ class SetupTest(unittest.TestCase):
         py, pyw = setup.python_exes()
         self.saved = (setup.shell_recycle, setup.shell_runas, setup.VERIFY_WAIT,
                       setup.copy_program, setup.program_files)
+        self.saved_more = (setup.stop_program, setup.drive_type, setup.python_version,
+                           setup._rename)
         setup.VERIFY_WAIT = 0
         setup.program_files = lambda: setup.source_files(self.src, py, pyw)
+        self.stops = []   # stop_program calls (the real one does nothing on a test root)
+        setup.stop_program = lambda layout, notes: self.stops.append(layout.root)
         # Fake Recycle Bin: nothing in these tests reaches the user's real bin.
         self.recycled = []
 
@@ -107,6 +111,8 @@ class SetupTest(unittest.TestCase):
     def tearDown(self):
         (setup.shell_recycle, setup.shell_runas, setup.VERIFY_WAIT,
          setup.copy_program, setup.program_files) = self.saved
+        (setup.stop_program, setup.drive_type, setup.python_version,
+         setup._rename) = self.saved_more
         try:
             setup.delete_test_tree(self.layout.test_key)
         finally:
@@ -136,7 +142,8 @@ class SetupTest(unittest.TestCase):
         lay = self.layout
         for key in [lay.run_key, lay.approved_key, lay.approved_folder_key] + lay.old_host_keys:
             self.assertTrue(key.startswith(setup.TEST_PREFIX), key)
-        for path in (lay.local_dir, lay.roaming_dir, lay.program_dir, lay.result_file,
+        for path in (lay.local_dir, lay.roaming_dir, lay.program_dir, lay.program_new,
+                     lay.program_old, lay.result_file,
                      lay.startup_dir, lay.shortcut):
             self.assertTrue(path.startswith(self.root), path)
         self.assertEqual(setup.Layout(self.root).reg_base, lay.reg_base)  # same root, same key
@@ -332,19 +339,241 @@ class SetupTest(unittest.TestCase):
 
     def test_admin_box_answered_no(self):
         def cancelled(exe, params, folder, timeout):
-            raise setup.SetupError("The admin box was answered No. Nothing was changed.")
+            raise setup.Refused(setup.NO_TEXT)
         setup.shell_runas = cancelled
         rc, text = self.run_cli("--install")
         self.assertEqual(rc, 1, text)
-        self.assertIn("answered No", text)
+        self.assertIn("You chose No in the Windows permission box", text)
         self.assertFalse(os.path.exists(self.layout.program_dir))
         self.assert_nothing_registered()
+        self.assertEqual(self.stops, [])  # the running knob is left alone
 
     def test_admin_step_without_result(self):
         setup.shell_runas = lambda exe, params, folder, timeout: 1
         rc, text = self.run_cli("--install")
         self.assertEqual(rc, 1, text)
+        self.assertIn("Copying didn't finish. Try again.", text)
         self.assert_nothing_registered()
+        self.assertEqual(self.stops, [])
+
+    def test_admin_step_too_long(self):
+        def slow(exe, params, folder, timeout):
+            raise setup.TookTooLong("took too long")
+        setup.shell_runas = slow
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("Copying took too long. Try again.", text)
+
+    # ---- updates: the installed version survives every failure
+    def _install_ok(self):
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 0, text)
+        self.stops.clear()
+        return self.snapshot(self.layout.program_dir)
+
+    def snapshot(self, top):
+        out = {}
+        for folder, _, files in os.walk(top):
+            for f in files:
+                full = os.path.join(folder, f)
+                with open(full, "rb") as fh:
+                    out[os.path.relpath(full, top)] = fh.read()
+        return out
+
+    def assert_old_copy_intact(self, before):
+        lay = self.layout
+        self.assertEqual(self.snapshot(lay.program_dir), before)
+        self.assertTrue(os.path.exists(lay.shortcut))
+        self.assertFalse(os.path.exists(lay.program_new))
+        self.assertFalse(os.path.exists(lay.program_old))
+        self.assertEqual(self.stops, [])
+
+    def _bump_source(self):
+        with open(os.path.join(self.src, "version.py"), "w") as f:
+            f.write('VERSION = "9.9.9"\n')
+
+    def test_update_refused_write_keeps_old_copy(self):
+        before = self._install_ok()
+        self._bump_source()
+        real_copy = self.saved[3]
+
+        def copy_refused(src, dest):
+            real_copy(src, dest)
+            raise PermissionError(13, "Permission denied", "background.js")
+        setup.copy_program = copy_refused
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("so nothing was changed", text)
+        self.assertIn("Your installed version still works.", text)
+        self.assert_old_copy_intact(before)
+
+    def test_update_lost_file_keeps_old_copy(self):
+        before = self._install_ok()
+        self._bump_source()
+        real_copy = self.saved[3]
+
+        def copy_then_lose(src, dest):
+            real_copy(src, dest)
+            os.remove(os.path.join(dest, "extension", "page.js"))
+        setup.copy_program = copy_then_lose
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("page.js", text)
+        self.assert_old_copy_intact(before)
+
+    def test_update_crash_keeps_old_copy(self):
+        before = self._install_ok()
+        real_copy = self.saved[3]
+
+        def copy_crash(src, dest):
+            real_copy(src, dest)
+            raise TypeError("copytree() got an unexpected keyword argument")
+        setup.copy_program = copy_crash
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("TypeError", text)
+        self.assert_old_copy_intact(before)
+
+    def test_elevated_step_catches_any_error(self):
+        def boom(*a, **k):
+            raise KeyError("x")
+        lay = self.layout
+        real = setup.expected_files
+        setup.expected_files = boom
+        try:
+            rc, text = self.run_cli("--install")
+        finally:
+            setup.expected_files = real
+        self.assertEqual(rc, 1, text)
+        self.assertIn("KeyError", text)
+        self.assertFalse(os.path.exists(lay.program_new))
+        self.assert_nothing_registered()
+
+    def test_update_file_in_use_rolls_back(self):
+        before = self._install_ok()
+        self._bump_source()
+        lay = self.layout
+        # Held open without delete sharing (like a program reading it): the extension
+        # folder can't be moved, so the whole swap is put back.
+        with open(os.path.join(lay.program_dir, "extension", "page.js"), "rb"):
+            rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("is in use (extension). Close Brave and run setup again.", text)
+        self.assertIn("Your installed version still works.", text)
+        self.assert_old_copy_intact(before)
+
+    def test_swap_rollback_when_a_move_fails(self):
+        before = self._install_ok()
+        self._bump_source()
+        lay = self.layout
+        real = setup._rename
+        moves = []
+
+        def failing(a, b):
+            if os.path.basename(a) == "setup_knob" and setup._same(
+                    os.path.dirname(a), lay.program_new):
+                raise PermissionError(5, "Access is denied")
+            moves.append((a, b))
+            return real(a, b)
+        setup._rename = failing
+        try:
+            rc, text = self.run_cli("--install")
+        finally:
+            setup._rename = real
+        self.assertEqual(rc, 1, text)
+        self.assertIn("(setup_knob)", text)
+        self.assertTrue(len(moves) > 3, moves)  # it really had started swapping
+        self.assert_old_copy_intact(before)
+
+    def test_update_swaps_in_new_files_and_drops_stale_ones(self):
+        self._install_ok()
+        lay = self.layout
+        stale = os.path.join(lay.program_dir, "knob", "removed_in_new_version.py")
+        open(stale, "w").close()
+        self._bump_source()
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 0, text)
+        with open(os.path.join(lay.program_dir, "version.py")) as f:
+            self.assertIn("9.9.9", f.read())
+        self.assertFalse(os.path.exists(stale))
+        for rel, size in setup.expected_files(self.src).items():
+            self.assertEqual(os.path.getsize(os.path.join(lay.program_dir, rel)), size, rel)
+        self.assertFalse(os.path.exists(lay.program_new))
+        self.assertFalse(os.path.exists(lay.program_old))
+        self.assertEqual(len(self.stops), 1)  # stopped once, after the copy
+
+    def test_leftover_new_folder_is_cleared(self):
+        lay = self.layout
+        os.makedirs(os.path.join(lay.program_new, "junk"))
+        os.makedirs(os.path.join(lay.program_old, "junk"))
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 0, text)
+        self.assertFalse(os.path.exists(os.path.join(lay.program_dir, "junk")))
+        self.assertFalse(os.path.exists(lay.program_new))
+        self.assertFalse(os.path.exists(lay.program_old))
+
+    def test_uninstall_removes_marked_leftovers(self):
+        lay = self.layout
+        os.makedirs(lay.program_old)
+        open(os.path.join(lay.program_old, setup.MARKER), "w").close()
+        rc, text = self.run_cli("--uninstall")
+        self.assertEqual(rc, 0, text)
+        self.assertFalse(os.path.exists(lay.program_old))
+
+    def test_uninstall_refused_note(self):
+        self._install_ok()
+
+        def cancelled(exe, params, folder, timeout):
+            raise setup.Refused(setup.NO_TEXT)
+        setup.shell_runas = cancelled
+        rc, text = self.run_cli("--uninstall")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("You chose No in the Windows permission box, so the program folder", text)
+        self.assertTrue(os.path.isfile(os.path.join(self.layout.program_dir, setup.MARKER)))
+
+    def test_network_drive_refused(self):
+        setup.drive_type = lambda root: setup.DRIVE_REMOTE
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("is on a network drive", text)
+        self.assertEqual(self.elevated, [])
+        self.assert_nothing_registered()
+        setup.drive_type = lambda root: 3  # DRIVE_FIXED
+        self.assertIsNone(setup.network_drive(self.src))
+        self.assertIsNone(setup.network_drive(r"\\server\share\x"))
+
+    def test_old_python_refused(self):
+        setup.python_version = lambda: (3, 7)
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 1, text)
+        self.assertIn("needs Python 3.8 or newer (this is 3.7)", text)
+        self.assertEqual(self.elevated, [])
+
+    def test_texts(self):
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 0, text)
+        self.assertTrue(text.startswith("8BitDo Volume Knob is installed. It starts with "
+                                        "Windows."), text)
+        self.assertIn("(one Windows permission box)", text)
+        self.assertEqual(setup.read_shortcut(self.layout.shortcut)["description"],
+                         "8BitDo Volume Knob")
+        self.assertNotIn("admin", text.lower())
+
+    def test_startup_turned_off_is_a_note(self):
+        lay = self.layout
+        with setup.winreg.CreateKeyEx(setup.HKCU, lay.approved_folder_key, 0,
+                                      setup.winreg.KEY_WRITE) as k:
+            setup.winreg.SetValueEx(k, setup.SHORTCUT, 0, setup.winreg.REG_BINARY,
+                                    b"\x03" + b"\x00" * 11)
+        rc, text = self.run_cli("--install")
+        self.assertEqual(rc, 0, text)
+        self.assertIn("turned off in Task Manager", text)
+        with setup.winreg.CreateKeyEx(setup.HKCU, lay.approved_folder_key, 0,
+                                      setup.winreg.KEY_WRITE) as k:
+            setup.winreg.SetValueEx(k, setup.SHORTCUT, 0, setup.winreg.REG_BINARY,
+                                    b"\x02" + b"\x00" * 11)
+        rc, text = self.run_cli("--install")
+        self.assertNotIn("turned off", text)
 
     def test_remove_guard(self):
         lay = self.layout

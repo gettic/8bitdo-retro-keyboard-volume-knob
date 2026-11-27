@@ -128,7 +128,7 @@ def _make_ui(settings, ctl, stop, log):
                 settings_path=os.path.join(config.data_dir(), config.SETTINGS_NAME))
         ui.create()
     except Exception as e:
-        log.error("tray icon / volume pop-up not available (%s); the knob still works", e)
+        log.error("taskbar icon / volume pop-up not available (%s); the knob still works", e)
         return None
     return ui
 
@@ -143,14 +143,17 @@ def _print(text):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    p = argparse.ArgumentParser(prog="volume_knob", add_help=True)
-    p.add_argument("--version", action="store_true")
+    p = argparse.ArgumentParser(
+        prog="volume_knob", add_help=True,
+        description="8BitDo Volume Knob: without options it runs in the background.",
+        epilog="Set up / remove: volume_knob.py --install  or  volume_knob.py --uninstall")
+    p.add_argument("--version", action="store_true", help="show the version")
     p.add_argument("--stop", action="store_true", help="stop the running program")
     p.add_argument("--test", action="store_true", help="developer check (see selftest.py)")
-    p.add_argument("--self-test", action="store_true", help="read-only health check")
+    p.add_argument("--self-test", action="store_true", help="check that everything works (changes nothing)")
     p.add_argument("--out", help="also write test results to this file")
     p.add_argument("--spotify-login", action="store_true",
-                   help="one-time Spotify login (Premium) so the knob moves Spotify's own bar")
+                   help="one-time Spotify login (Premium) so the knob moves Spotify's own slider")
     p.add_argument("--spotify-logout", action="store_true", help="remove the Spotify login")
     try:
         args = p.parse_args(argv)
@@ -161,7 +164,7 @@ def main(argv=None):
         return 0
     if args.stop:
         ok = request_stop()
-        _print("stop sent" if ok else "not running")
+        _print("Stopping the program." if ok else "The program isn't running.")
         return 0
     if args.spotify_login or args.spotify_logout:
         from . import spotify_login

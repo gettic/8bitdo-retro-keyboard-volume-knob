@@ -8,7 +8,11 @@ const PORTS = [38475, 38476, 38477];
 const WS_PATH = "/volume-knob/2";
 const PROTOCOL = 2;
 const HEARTBEAT_MS = 2000;
-const RETRY_MS = [2000, 5000, 10000, 30000]; // after all ports failed
+const RETRY_MS = [1000, 2000, 5000]; // after all ports failed (local connects are cheap)
+const GRACE_MS = 4000;     // keep the link this long after the last tab went (page reloads)
+const MAX_DELTA = 0.2;     // the program's largest knob step (config "step" 0.01-0.20)
+const MAX_SET = 1.0;       // set_volume never boosts (tray quick row / failsafe are <= 1.0)
+const PROBE_MS = 2000;     // a tab's probe answer is forwarded only this long after a probe
 const SITES = new Set(["youtube", "ytmusic"]);
 const BOOST = new Set(["off", "on", "blocked", "unavailable", "error"]);
 const FEATURES = ["boost", "set_volume"];
@@ -22,6 +26,8 @@ let nativeRetryTimer = 0;
 let heartbeatTimer = 0;
 let lastFailLogged = 0;
 let sendTimer = 0;
+let graceTimer = 0;
+let probeUntil = 0;
 
 function tabList() {
   const list = [];
@@ -122,6 +128,7 @@ function retryNative(wait) {
 }
 
 function disconnectNative() {
+  if (graceTimer) { clearTimeout(graceTimer); graceTimer = 0; }
   if (nativeRetryTimer) { clearTimeout(nativeRetryTimer); nativeRetryTimer = 0; }
   if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = 0; }
   const ws = socket;
@@ -149,20 +156,22 @@ function onHostMessage(msg) {
   let cmd;
   if (type === "volume") {
     const d = msg.delta;
-    if (typeof d !== "number" || !Number.isFinite(d) || d < -1.5 || d > 1.5) return;
-    cmd = { type: "volume", delta: d };
+    if (typeof d !== "number" || !Number.isFinite(d)) return;
+    // One knob click at most: whoever answers on the port can't jump a tab up.
+    cmd = { type: "volume", delta: Math.min(MAX_DELTA, Math.max(-MAX_DELTA, d)) };
     // "max" missing = 1.0 (no boost), PROTOCOL.md v2.
     const m = msg.max;
     cmd.max = typeof m === "number" && Number.isFinite(m) ? Math.min(1.5, Math.max(0, m)) : 1.0;
   } else if (type === "set_volume") {
     const v = msg.volume;
     if (typeof v !== "number" || !Number.isFinite(v)) return;
-    cmd = { type: "set_volume", volume: Math.min(1.5, Math.max(0, v)) };
+    cmd = { type: "set_volume", volume: Math.min(MAX_SET, Math.max(0, v)) };
   } else if (type === "mute") {
     cmd = { type: "mute" };
     if (typeof msg.muted === "boolean") cmd.muted = msg.muted;
   } else {
     cmd = { type: "probe" };
+    probeUntil = Date.now() + PROBE_MS;
   }
   for (const [tabId, t] of tabs) {
     if (!t.state) continue;
@@ -179,6 +188,7 @@ chrome.runtime.onConnect.addListener((port) => {
   }
   if (port.sender.id !== chrome.runtime.id) { port.disconnect(); return; }
   const tabId = port.sender.tab.id;
+  if (graceTimer) { clearTimeout(graceTimer); graceTimer = 0; }
   const old = tabs.get(tabId);
   if (old && old.port !== port) {
     try { old.port.disconnect(); } catch (e) { /* ignore */ }
@@ -210,7 +220,9 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       scheduleState();
     } else if (msg.type === "probe") {
-      // Test diagnostics only: what the page's own controls show.
+      // Test diagnostics only: what the page's own controls show. Only as an
+      // answer to the program's probe, never on the page's own initiative.
+      if (Date.now() > probeUntil) return;
       post({ type: "probe", tab: tabId, ytSlider: msg.ytSlider,
              ytmSlider: msg.ytmSlider, saved: msg.saved, box: msg.box });
     }
@@ -220,8 +232,15 @@ chrome.runtime.onConnect.addListener((port) => {
     void chrome.runtime.lastError;
     if (tabs.get(tabId) === entry) tabs.delete(tabId);
     if (tabs.size === 0) {
+      // Tell the program at once, but keep the link a moment: a reload or a
+      // YouTube link brings a new tab port right away.
       sendState();
-      disconnectNative();
+      if (!graceTimer) {
+        graceTimer = setTimeout(() => {
+          graceTimer = 0;
+          if (tabs.size === 0) disconnectNative();
+        }, GRACE_MS);
+      }
     } else {
       scheduleState();
     }

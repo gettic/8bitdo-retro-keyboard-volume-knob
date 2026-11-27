@@ -556,7 +556,7 @@ class QuickSetControllerTests(unittest.TestCase):
         ctl.poll()
         ctl.on_event(("set", 1.0))
         self.assertEqual(sp.set, 1.0)
-        self.assertEqual(self.spotify._volume, 0.4)          # mixer volume untouched
+        self.assertEqual(self.spotify._volume, 1.0)          # a lowered mixer level goes full
         self.assertFalse(self.spotify._muted)                 # mixer mute cleared
 
     def test_spotify_web_unknown_falls_back_to_mixer(self):

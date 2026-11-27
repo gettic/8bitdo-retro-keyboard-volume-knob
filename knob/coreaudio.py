@@ -9,6 +9,9 @@ import ctypes.wintypes as wt
 import os
 
 ole32 = ctypes.OleDLL("ole32")
+_ole32_void = ctypes.WinDLL("ole32")  # for functions that return nothing (no HRESULT check)
+_ole32_void.CoUninitialize.restype = None
+_ole32_void.CoUninitialize.argtypes = ()
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 kernel32.OpenProcess.argtypes = (wt.DWORD, wt.BOOL, wt.DWORD)
 kernel32.OpenProcess.restype = wt.HANDLE
@@ -72,6 +75,21 @@ def _query(obj, iid):
     out = ctypes.c_void_p()
     _call(obj, 0, ctypes.byref(iid), ctypes.byref(out))
     return out
+
+
+_ole32_void.CoTaskMemFree.restype = None
+_ole32_void.CoTaskMemFree.argtypes = (ctypes.c_void_p,)
+
+
+def _string(obj, index):
+    """A COM method that hands out a CoTaskMem string (GetId, GetSessionInstanceIdentifier)."""
+    p = ctypes.c_void_p()
+    _call(obj, index, ctypes.byref(p))
+    try:
+        return ctypes.wstring_at(p.value) if p.value else ""
+    finally:
+        if p.value:
+            _ole32_void.CoTaskMemFree(p)
 
 
 def process_name(pid):
@@ -163,7 +181,13 @@ class Session:
 
 
 class CoreAudio:
-    """Lists app sound sessions. Create and use on one thread."""
+    """Lists app sound sessions. Create and use on one thread.
+
+    The device enumerator, each device's session manager and each session's
+    `Session` object are kept between calls of sessions(): a refresh only
+    lists what is there and asks about new sessions (much less cross-process
+    COM work every 2 s). CoreAudio owns the Session objects: callers don't
+    release them; gone ones are released here, the rest by close()."""
 
     def __init__(self):
         try:
@@ -171,11 +195,25 @@ class CoreAudio:
             self._uninit = True
         except OSError:  # already initialised differently on this thread
             self._uninit = False
+        self._enum = None
+        self._mgrs = {}    # device id -> IAudioSessionManager2
+        self._known = {}   # session instance id -> Session (a wanted app)
+        self._names = {}   # session instance id -> (pid, exe name) of any app seen
 
     def close(self):
+        self.reset()
         if self._uninit:
-            ole32.CoUninitialize()
+            _ole32_void.CoUninitialize()
             self._uninit = False
+
+    def reset(self):
+        """Forget every kept object (after an error: the next sessions() starts clean)."""
+        for s in self._known.values():
+            s.release()
+        for mgr in self._mgrs.values():
+            _release(mgr)
+        _release(self._enum)
+        self._enum, self._mgrs, self._known, self._names = None, {}, {}, {}
 
     def _enumerator(self):
         enum = ctypes.c_void_p()
@@ -185,12 +223,21 @@ class CoreAudio:
 
     def sessions(self, apps=None):
         """Sessions of the given exe names (None = all named apps), on every
-        active output device. Caller must release() each one."""
-        found = []
-        enum = self._enumerator()
+        active output device. The objects stay valid until the next call
+        drops them (session gone), reset() or close()."""
+        try:
+            return self._list(apps)
+        except OSError:
+            self.reset()  # something kept went stale (audio service restart...): once more
+            return self._list(apps)
+
+    def _list(self, apps):
+        if self._enum is None:
+            self._enum = self._enumerator()
+        found, seen_dev, seen = [], set(), set()
         devices = ctypes.c_void_p()
         try:
-            _call(enum, 3, ctypes.c_int(E_RENDER), wt.DWORD(DEVICE_STATE_ACTIVE),
+            _call(self._enum, 3, ctypes.c_int(E_RENDER), wt.DWORD(DEVICE_STATE_ACTIVE),
                   ctypes.byref(devices))
             n_dev = wt.UINT()
             _call(devices, 3, ctypes.byref(n_dev))
@@ -198,23 +245,32 @@ class CoreAudio:
                 dev = ctypes.c_void_p()
                 try:
                     _call(devices, 4, wt.UINT(d), ctypes.byref(dev))
-                    found.extend(self._device_sessions(dev, apps))
+                    dev_id = _string(dev, 5)  # IMMDevice::GetId
+                    mgr = self._mgrs.get(dev_id)
+                    if mgr is None:
+                        mgr = ctypes.c_void_p()
+                        _call(dev, 3, ctypes.byref(IID_IAudioSessionManager2),
+                              wt.DWORD(CLSCTX_ALL), ctypes.c_void_p(), ctypes.byref(mgr))
+                        self._mgrs[dev_id] = mgr
+                    seen_dev.add(dev_id)
+                    found.extend(self._device_sessions(mgr, apps, seen))
                 except OSError:
                     pass
                 finally:
                     _release(dev)
         finally:
             _release(devices)
-            _release(enum)
+        for dev_id in [k for k in self._mgrs if k not in seen_dev]:  # device unplugged
+            _release(self._mgrs.pop(dev_id))
+        for inst in [k for k in self._known if k not in seen]:      # session gone
+            self._known.pop(inst).release()
+        self._names = {k: v for k, v in self._names.items() if k in seen}
         return found
 
-    def _device_sessions(self, dev, apps):
+    def _device_sessions(self, mgr, apps, seen):
         out = []
-        mgr = ctypes.c_void_p()
         sessions = ctypes.c_void_p()
         try:
-            _call(dev, 3, ctypes.byref(IID_IAudioSessionManager2), wt.DWORD(CLSCTX_ALL),
-                  ctypes.c_void_p(), ctypes.byref(mgr))
             _call(mgr, 5, ctypes.byref(sessions))
             n = ctypes.c_int()
             _call(sessions, 3, ctypes.byref(n))
@@ -228,14 +284,23 @@ class CoreAudio:
                     if state.value == SESSION_STATE_EXPIRED:
                         continue
                     ctl2 = _query(ctl, IID_IAudioSessionControl2)
-                    pid = wt.DWORD()
-                    try:
-                        _call(ctl2, 14, ctypes.byref(pid))
-                    except OSError:  # multi-process session: no single pid
+                    inst = _string(ctl2, 13)  # GetSessionInstanceIdentifier
+                    seen.add(inst)
+                    known = self._known.get(inst)
+                    if known is not None:
+                        if apps is None or known.exe in apps:
+                            out.append(known)
                         continue
-                    if not pid.value:
-                        continue
-                    name = process_name(pid.value)
+                    info = self._names.get(inst)
+                    if info is None:
+                        pid = wt.DWORD()
+                        try:
+                            _call(ctl2, 14, ctypes.byref(pid))
+                        except OSError:  # multi-process session: no single pid
+                            pid.value = 0
+                        info = (pid.value, process_name(pid.value) if pid.value else "")
+                        self._names[inst] = info
+                    pid, name = info
                     if not name or (apps is not None and name not in apps):
                         continue
                     vol = _query(ctl, IID_ISimpleAudioVolume)
@@ -243,7 +308,8 @@ class CoreAudio:
                         meter = _query(ctl, IID_IAudioMeterInformation)
                     except OSError:
                         meter = None
-                    out.append(Session(pid.value, name, vol, meter))
+                    s = self._known[inst] = Session(pid, name, vol, meter)
+                    out.append(s)
                 except OSError:
                     pass
                 finally:
@@ -253,7 +319,6 @@ class CoreAudio:
             pass
         finally:
             _release(sessions)
-            _release(mgr)
         return out
 
     def master_volume(self):

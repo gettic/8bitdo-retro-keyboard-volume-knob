@@ -86,8 +86,8 @@ def wait_for_code(port, state, timeout=LOGIN_SECONDS, ready=None):
             got_state = (q.get("state") or [""])[0]
             if not secrets.compare_digest(got_state.encode("utf-8", "replace"),
                                           state.encode("utf-8")):  # any text is just "wrong"
-                self._page(400, "Login not accepted",
-                           "This answer does not belong to the login that was started.")
+                self._page(400, "Old login page",
+                           "This page is from an earlier login. Use the newest Spotify tab.")
                 return  # keep waiting for the real one
             if q.get("error"):
                 result["error"] = "Spotify login was cancelled or refused"
@@ -95,7 +95,7 @@ def wait_for_code(port, state, timeout=LOGIN_SECONDS, ready=None):
             elif q.get("code"):
                 result["code"] = q["code"][0]
                 self._page(200, "Spotify connected",
-                           "You can close this tab and go back to the console.")
+                           "You can close this tab and go back to the terminal.")
             else:
                 result["error"] = "Spotify sent no login code"
                 self._page(400, "Login failed", "No login code was received.")
@@ -104,7 +104,8 @@ def wait_for_code(port, state, timeout=LOGIN_SECONDS, ready=None):
     try:
         srv = _Server(("127.0.0.1", port), Handler)
     except OSError:
-        return None, f"port {port} is in use; close the program using it and try again"
+        return None, (f"another program is using what the login needs (port {port}); "
+                      "restart the PC and try again")
     srv.timeout = 0.5
     if ready:
         ready()
@@ -116,7 +117,7 @@ def wait_for_code(port, state, timeout=LOGIN_SECONDS, ready=None):
         srv.server_close()
     if "code" in result:
         return result["code"], None
-    return None, result.get("error", "no answer from the browser within 2 minutes")
+    return None, result.get("error", "no answer within 2 minutes (did you click Agree?)")
 
 
 def exchange(accounts, client_id, code, verifier, redirect_uri, timeout=10.0):
@@ -131,7 +132,8 @@ def exchange(accounts, client_id, code, verifier, redirect_uri, timeout=10.0):
         raise api.ApiError("Spotify could not be reached")
     tok = r.data.get("refresh_token") if isinstance(r.data, dict) else None
     if r.status != 200 or not isinstance(tok, str) or not tok:
-        raise api.ApiError(f"Spotify did not accept the login (HTTP {r.status})")
+        raise api.ApiError("Spotify did not accept the login; check the Client ID and "
+                           f"Redirect URI in your Spotify app (code {r.status})")
     return tok
 
 
@@ -141,7 +143,7 @@ def login(out=print, ask=input, open_browser=webbrowser.open, path=None,
     """The whole --spotify-login. Returns a process exit code."""
     path = path or api.store_path()
     redirect = f"http://127.0.0.1:{port}/callback"
-    out("Spotify login for the 8BitDo volume knob (needs Spotify Premium).")
+    out("Spotify login for the 8BitDo Volume Knob (needs Spotify Premium).")
     out("Keep Spotify open on this PC while you log in.")
     try:
         cid = (ask("Paste your Spotify Client ID: ") or "").strip()
@@ -163,8 +165,11 @@ def login(out=print, ask=input, open_browser=webbrowser.open, path=None,
         creds = {"client_id": cid, "refresh_token": refresh, "device_id": None,
                  "device_name": None}
         client = api.Client(creds, path, api_base, accounts, timeout=10.0)
-        client.refresh()
-        device = api.pick_this_pc(client.devices(), creds, pc_name)
+        try:
+            client.refresh()
+            device = api.pick_this_pc(client.devices(), creds, pc_name)
+        finally:
+            client.close()
     except api.ApiError as e:
         out(f"Login not finished: {e.reason}.")
         return 1
@@ -177,11 +182,11 @@ def login(out=print, ask=input, open_browser=webbrowser.open, path=None,
         out(f"Could not save the login: {e.strerror or e}.")
         return 1
     if device is not None:
-        out(f"Spotify connected. This PC's Spotify device: {creds['device_name']}.")
+        out(f"Spotify connected. Spotify calls this PC \"{creds['device_name']}\".")
     else:
         out("Spotify connected, but this PC's Spotify app was not found. If the knob keeps "
             "using the Windows mixer, open Spotify on this PC and run --spotify-login again.")
-    out("The running knob uses it within a few seconds. You can close this window.")
+    out("The knob uses it within a few seconds. You can close this window.")
     return 0
 
 

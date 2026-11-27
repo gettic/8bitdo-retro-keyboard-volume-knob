@@ -62,7 +62,7 @@ def tooltip(rows, paused=False, keys_ok=True):
     if paused:
         text = f"{TITLE} - paused (Windows controls the volume)"
     elif not keys_ok:
-        text = f"{TITLE} - volume keys in use by another program"
+        text = f"{TITLE} - another program has the volume keys (retrying)"
     elif rows:
         text = f"{TITLE} - " + ", ".join(row_text(r) for r in rows)
     else:

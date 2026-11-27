@@ -61,7 +61,7 @@ class LogicTests(unittest.TestCase):
         self.assertEqual(t([Row("Spotify", 0.4, True, 1.0), Row("YouTube", 0.7, False, 1.5)]),
                          "8BitDo Volume Knob - Spotify muted, YouTube 70%")
         self.assertIn("paused", t([Row("Spotify", 0.4, False, 1.0)], paused=True))
-        self.assertIn("in use by another program", t([], keys_ok=False))
+        self.assertIn("another program has the volume keys", t([], keys_ok=False))
         long = [Row("X" * 60, 0.5, False, 1.0)] * 4
         self.assertLessEqual(len(t(long)), display.TIP_MAX)
 
@@ -454,7 +454,7 @@ class UiWindowTests(unittest.TestCase):
         self.assertEqual([t for c, t, e in ui.menu_items(False)][3:6],
                          ["Pause", "Open log", "Settings"])
         self.ui.keys_status(False, False)
-        self.assertIn("in use", self.shell.calls[-1][1])
+        self.assertIn("another program has the volume keys", self.shell.calls[-1][1])
 
     def test_taskbar_created_readds(self):
         n = len(self.shell.calls)

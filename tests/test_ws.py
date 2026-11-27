@@ -350,6 +350,15 @@ class BindTests(unittest.TestCase):
         finally:
             blocker.close()
 
+    def test_close_wakes_accept_at_once(self):
+        s = WsServer([0], lambda c, m: None, peer_check=ALLOW)
+        s.start()
+        time.sleep(0.05)
+        t = time.monotonic()
+        s.close()
+        self.assertLess(time.monotonic() - t, 0.3)   # not the 0.5 s accept timeout
+        self.assertFalse(s._accept_thread.is_alive())
+
     def test_close_with_client_is_quick_and_frees_port(self):
         s = WsServer([0], lambda c, m: None, peer_check=ALLOW)
         port = s.start()

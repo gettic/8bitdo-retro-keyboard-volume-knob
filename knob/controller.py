@@ -25,8 +25,10 @@ def _running_exes(names):
 
 
 class Controller:
-    """`audio_factory()` must return an object with sessions(apps) and close();
-    it is called on the controller's own thread (COM is per thread)."""
+    """`audio_factory()` must return an object with sessions(apps), close()
+    and optionally reset(); it is called on the controller's own thread (COM
+    is per thread). The audio object owns the sessions it hands out (it
+    releases them); the controller never releases them itself."""
 
     def __init__(self, settings, audio_factory, bridge, clock=time.monotonic,
                  process_lister=_running_exes, display=None, spotify=None,
@@ -56,6 +58,10 @@ class Controller:
         self._sessions = []
         self._refreshed = None
         self._warned = set()
+        self._audio_failing = False
+        self._rebuild = False   # next refresh: audio.reset() first (a kept object failed)
+        self._brave_orig = {}   # Brave pid -> (volume, muted) before the fallback changed it
+        self._quiet = set()     # exes the knob muted / turned to 0 % (stay the target, see _targets)
         bridge.events = self.keys.put  # tab states / host gone -> this thread
 
     def _spotify_changed(self):
@@ -81,11 +87,17 @@ class Controller:
                     break
                 try:
                     self.poll()
+                except Exception:  # keep running whatever happens
+                    log.exception("error in audio thread")
+                    self._drop_sessions()
+                if not action:
+                    continue
+                try:  # the key still counts when the poll failed (tabs need no Core Audio)
                     if isinstance(action, tuple):
                         self.on_event(action)
-                    elif action:
+                    else:
                         self.handle(action)
-                except Exception:  # keep running whatever happens
+                except Exception:
                     log.exception("error in audio thread")
                     self._drop_sessions()
         finally:
@@ -99,22 +111,46 @@ class Controller:
         return apps
 
     def _drop_sessions(self):
-        for s in self._sessions:
-            try:
-                s.release()
-            except OSError:
-                pass
+        """Forget the session list; the audio object (which owns the sessions)
+        starts clean on the next refresh."""
         self._sessions = []
+        self._session_error()
+
+    def _session_error(self):
+        """A session call failed (app closed, device unplugged...): list again
+        on the next poll, with every kept Core Audio object made new."""
         self._refreshed = None
+        self._rebuild = True
 
     def refresh(self, force=False):
-        """Rebuild the session list every REFRESH_INTERVAL s. True if it did."""
+        """Re-list the sessions every REFRESH_INTERVAL s. True if it did."""
         now = self.clock()
         if not force and self._refreshed is not None and now - self._refreshed < REFRESH_INTERVAL:
             return False
-        self._drop_sessions()
-        self._sessions = self.audio.sessions(self._wanted_apps())
+        if self._rebuild:
+            self._rebuild = False
+            reset = getattr(self.audio, "reset", None)
+            if reset:
+                try:
+                    reset()
+                except OSError:
+                    pass
+        try:
+            self._sessions = self.audio.sessions(self._wanted_apps())
+        except OSError as e:
+            # Windows audio not answering (service restart, driver update, resume):
+            # no apps for now, tabs still work; retried on the normal 2 s refresh
+            if not self._audio_failing:
+                log.warning("Windows audio not available (%s); retrying every %g s",
+                            e, REFRESH_INTERVAL)
+            self._audio_failing = True
+            self._sessions = []
+        else:
+            if self._audio_failing:
+                log.info("Windows audio available again")
+            self._audio_failing = False
         self._refreshed = now
+        self._forget_gone()
         self.activity.forget_except({s.exe for s in self._sessions})
         if self.spotify is not None:
             self.spotify.set_present(any(s.exe == SPOTIFY for s in self._sessions))
@@ -123,15 +159,48 @@ class Controller:
     def _spotify_web(self, exe):
         return exe == SPOTIFY and self.spotify is not None and self.spotify.usable()
 
+    def _forget_gone(self):
+        """Drop remembered Brave sessions whose process is gone."""
+        if self._audio_failing or not self._brave_orig:
+            return
+        pids = {s.pid for s in self._sessions if s.exe == BRAVE}
+        self._brave_orig = {p: v for p, v in self._brave_orig.items() if p in pids}
+
+    def _remember_brave(self, s):
+        """Before the Brave fallback changes Brave's whole sound: keep how it was,
+        so it can be put back once the extension takes over (_restore_brave)."""
+        if s.exe == BRAVE and s.pid not in self._brave_orig:
+            self._brave_orig[s.pid] = (s.volume(), s.muted())
+
+    def _restore_brave(self, now):
+        """The extension is connected again: undo what the fallback did to
+        Brave's whole sound (the knob can't reach it while the extension works)."""
+        if not self._brave_orig or not self.bridge.state.connected(now):
+            return
+        orig, self._brave_orig = self._brave_orig, {}
+        n = 0
+        for s in self._sessions:
+            if s.exe == BRAVE and s.pid in orig:
+                volume, muted = orig[s.pid]
+                try:
+                    s.set_volume(volume)
+                    s.set_mute(muted)
+                    n += 1
+                except OSError:
+                    self._session_error()
+        if n:
+            log.info("extension connected: Brave's own sound put back as it was")
+
     def poll(self):
         if self.refresh():
             self.update_display()  # volume changed elsewhere (Spotify's own slider...)
         now = self.clock()
+        self._restore_brave(now)
         for s in self._sessions:
             try:
                 self.activity.update(s.exe, s.peak(), now)
             except OSError:
-                self._refreshed = None  # session gone: rebuild next time
+                self._session_error()
 
     def _active_sessions(self, now):
         """Sessions the knob may change right now."""
@@ -148,14 +217,48 @@ class Controller:
         by_exe = {}
         for s in self._active_sessions(now):
             by_exe.setdefault(s.exe, []).append(s)
+        tabs = self.bridge.state.tabs(now)
+        # an app the knob muted / turned to 0 % while it played makes no sound,
+        # but stays the target (so Mute unmutes it) until something else plays
+        self._quiet = {exe for exe in self._quiet if self._is_quiet(exe, by_exe.get(exe))}
+        if self._quiet and (any(t.playing for t in tabs) or any(
+                exe not in self._quiet and self.activity.is_playing(exe, now) for exe in by_exe)):
+            self._quiet = set()
         apps = []
         for exe, group in by_exe.items():
+            playing = self.activity.is_playing(exe, now) or exe in self._quiet
+            if exe == BRAVE and not playing:
+                continue  # the Brave fallback only while Brave itself plays
             try:
                 muted = all(s.muted() for s in group)
             except OSError:
                 muted = False
-            apps.append(router.AppSource(exe, self.activity.is_playing(exe, now), muted))
-        return by_exe, apps, self.bridge.state.tabs(now)
+            apps.append(router.AppSource(exe, playing, muted))
+        by_exe = {a.exe: by_exe[a.exe] for a in apps}
+        return by_exe, apps, tabs
+
+    def _is_quiet(self, exe, group):
+        """All of the app's sessions muted, or its volume at 0 %."""
+        if not group:
+            return False
+        try:
+            if all(s.muted() for s in group):
+                return True
+            if self._spotify_web(exe):
+                level = self.spotify.level()
+                return level is not None and level <= 0.0005
+            return all(s.muted() or s.volume() <= 0.0005 for s in group)
+        except OSError:
+            return False
+
+    def _note_quiet(self, d, apps, by_exe):
+        """After a key: remember which playing apps the knob just silenced."""
+        playing = {a.exe for a in apps if a.playing}
+        for exe in d.apps:
+            if exe in playing and self._is_quiet(exe, by_exe[exe]):
+                self._quiet.add(exe)
+            else:
+                self._quiet.discard(exe)
 
     def set_level(self, level):
         """Tray menu 25/50/75/100 %: set the knob's target (playing app, else
@@ -170,22 +273,25 @@ class Controller:
             web = self._spotify_web(exe)
             for s in by_exe[exe]:
                 try:
+                    self._remember_brave(s)
                     if s.muted():
                         s.set_mute(False)
                     if not web:
                         s.set_volume(level)
+                    elif s.volume() < 1.0 - 1e-6:
+                        s.set_volume(1.0)  # a lowered mixer level: the slider alone sets it
                 except OSError:
-                    self._refreshed = None
+                    self._session_error()
             if web and self.spotify.set_to(level) is None:
                 for s in by_exe[exe]:  # Spotify's own volume not known yet: mixer instead
                     try:
                         s.set_volume(level)
                     except OSError:
-                        self._refreshed = None
+                        self._session_error()
         by_key = {(t.client, t.tab): t for t in tabs}
         for client, ids in d.tabs.items():
             if "set_volume" not in (self.bridge.features(client) or ()):
-                log.warning("host %s cannot set an exact volume; tabs left as they are", client)
+                log.warning("Brave tab link %s cannot set an exact volume; tabs left as they are", client)
                 continue
             muted = [tid for tid in ids if by_key[(client, tid)].muted]
             if muted:
@@ -193,6 +299,7 @@ class Controller:
             self.bridge.command(client, protocol.set_volume(level, tabs=ids))
             for tid in ids:
                 self._guess[(client, tid)] = (level, False, now)
+        self._note_quiet(d, apps, by_exe)
         if not d.empty():
             self._shown = self._sources(d, by_key)
             self.update_display(popup=True)
@@ -206,17 +313,12 @@ class Controller:
         for exe in d.apps:
             self._note_max(exe, by_exe[exe], d, now)
             if d.muted is None and self._spotify_web(exe):
-                # Spotify's own bar; mute (and un-muting on a turn) stays the Windows mixer's
-                for s in by_exe[exe]:
-                    try:
-                        if s.muted():
-                            s.set_mute(False)
-                    except OSError:
-                        self._refreshed = None
-                self.spotify.step(d.delta)
+                # Spotify's own slider; mute (and un-muting on a turn) stays the Windows mixer's
+                self._spotify_turn(by_exe[exe], d.delta)
                 continue
             for s in by_exe[exe]:
                 try:
+                    self._remember_brave(s)
                     if d.muted is not None:
                         s.set_mute(d.muted)
                     else:
@@ -224,7 +326,7 @@ class Controller:
                             s.set_mute(False)
                         s.set_volume(min(1.0, max(0.0, s.volume() + d.delta)))
                 except OSError:
-                    self._refreshed = None
+                    self._session_error()
         by_key = {(t.client, t.tab): t for t in tabs}
         for client, ids in d.tabs.items():
             self._guess_tabs(client, ids, by_key, d, now)
@@ -236,15 +338,40 @@ class Controller:
                 groups.setdefault(self._tab_max(client, by_key[(client, tid)]), []).append(tid)
             for mx, group in sorted(groups.items()):
                 self.bridge.command(client, protocol.volume(d.delta, tabs=group, max_volume=mx))
+        self._note_quiet(d, apps, by_exe)
         if not d.empty():
             self._shown = self._sources(d, by_key)
             self.update_display(popup=True)
         return d
 
+    def _spotify_turn(self, group, delta):
+        """A turn on Spotify's own slider. Once the slider is full, turning up
+        raises Spotify's Windows mixer level too (it may have been lowered
+        while the mixer was used instead), so the knob reaches full volume."""
+        lowered = []
+        for s in group:
+            try:
+                if s.muted():
+                    s.set_mute(False)
+                if s.volume() < 1.0 - 1e-6:
+                    lowered.append(s)
+            except OSError:
+                self._session_error()
+        level = self.spotify.level()
+        if delta > 0 and lowered and level is not None and level >= 1.0 - 1e-6:
+            for s in lowered:
+                try:
+                    s.set_volume(min(1.0, s.volume() + delta))
+                except OSError:
+                    self._session_error()
+            return
+        self.spotify.step(delta)
+
     # --- what the pop-up and the tray icon show ---
     def _note_max(self, exe, group, d, now):
-        """Windows apps (Spotify's own bar too) stop at 100 %: a turn up while
-        already there marks the app so its card row says "Max"; any other key clears it."""
+        """Windows apps (Spotify's own slider too) stop at 100 %: a turn up while
+        already there marks the app so its pop-up row says "Max"; any other key
+        clears it. With Spotify's own slider, its mixer level must be full too."""
         self._at_max.pop(exe, None)
         if d.muted is not None or d.delta <= 0 or not group:
             return
@@ -252,6 +379,8 @@ class Controller:
             level = self.spotify.level() if self._spotify_web(exe) else None
             if level is None:
                 level = group[0].volume()
+            else:
+                level = min(level, min(s.volume() for s in group))
         except OSError:
             return
         if view.percent(level) >= 100:
@@ -399,7 +528,7 @@ class Controller:
             log.info("Spotify: Windows mixer from now on")
         elif mode == "web" and self.spotify is None:
             if self.spotify_factory is None:
-                log.info("Spotify's own slider: used after a restart")
+                log.info("Spotify's own slider: used after a restart of the program")
                 return
             new = self.spotify_factory()
             new.on_change = self._spotify_changed
@@ -439,16 +568,16 @@ class Controller:
             key = (client, t["tab"])
             if t["boost"] == "error" and key not in self._warned:
                 self._warned.add(key)
-                log.warning("boost stopped working in a browser tab (host %s); "
+                log.warning("boost stopped working in a browser tab (Brave tab link %s); "
                             "the tab may need a reload", client)
         ids = self.failsafe.on_tabs(client, tabs, now, self._apps_open)
         if not ids:
             return
         features = self.bridge.features(client) or ()
         if "set_volume" not in features:
-            log.warning("failsafe: host %s cannot set volume; %d tab(s) left loud",
+            log.warning("Brave tab link %s cannot set an exact volume; %d loud tab(s) left as they are",
                         client, len(ids))
             return
-        log.info("failsafe: %d tab(s) over 100%% set to %d%%", len(ids),
+        log.info("turned %d loud tab(s) (over 100%%) down to %d%%", len(ids),
                  round(self.failsafe.level * 100))
         self.bridge.command(client, protocol.set_volume(self.failsafe.level, tabs=ids))

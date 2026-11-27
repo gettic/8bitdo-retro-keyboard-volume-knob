@@ -420,7 +420,7 @@ def menu_items(paused, keys_ok=True, level=None, muted=False):
     is the quick-volume row (menu.ROW) with the mute button."""
     head = f"{view.TITLE} {VERSION}"
     if not keys_ok and not paused:
-        head += " (volume keys in use)"
+        head += " (keys used elsewhere)"
     return [(0, head, False), quick_row(level, muted), (None, "", False),
             (CMD_PAUSE, "Resume" if paused else "Pause", True),
             (CMD_LOG, "Open log", True),
@@ -509,7 +509,7 @@ class Ui:
                 self.tray = Tray(self.hwnd, notify=self.notify,
                                  icons=IconCache(style=self.tray_style))
                 if not self.tray.add(self.icon_key(), self.tip()):
-                    log.info("tray icon not added yet (taskbar not ready); waiting for it")
+                    log.info("taskbar icon not added yet (taskbar not ready); waiting for it")
         except Exception:
             self.close()
             raise

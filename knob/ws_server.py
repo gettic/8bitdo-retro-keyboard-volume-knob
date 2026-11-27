@@ -349,6 +349,11 @@ class WsServer:
     def close(self):
         self._stop.set()
         if self._accept_thread:
+            if self.port and self._accept_thread.is_alive():
+                try:  # wake accept() now instead of after its 0.5 s timeout
+                    socket.create_connection((HOST, self.port), timeout=0.5).close()
+                except OSError:
+                    pass
             self._accept_thread.join(3)
         if self._sock:
             self._sock.close()
@@ -403,6 +408,9 @@ class WsServer:
                     break
                 time.sleep(0.1)
                 continue
+            if self._stop.is_set():  # close()'s wake-up connection (or one just too late)
+                sock.close()
+                break
             if not self._admit(sock, addr):
                 sock.close()
 

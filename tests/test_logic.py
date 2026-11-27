@@ -182,7 +182,11 @@ class ProtocolTests(unittest.TestCase):
                          {"type": "volume", "delta": -0.04, "max": 1.0, "site": "youtube"})
         self.assertEqual(protocol.set_volume(0.5, tabs=[4]),
                          {"type": "set_volume", "volume": 0.5, "tabs": [4]})
-        self.assertEqual(protocol.set_volume(3)["volume"], 1.5)
+        self.assertEqual(protocol.set_volume(3)["volume"], 1.0)    # never a boost
+        self.assertEqual(protocol.set_volume(1.3)["volume"], 1.0)
+        self.assertEqual(protocol.set_volume(-1)["volume"], 0.0)
+        self.assertEqual(protocol.volume(0.5)["delta"], 0.2)       # |delta| <= 0.2
+        self.assertEqual(protocol.volume(-0.5)["delta"], -0.2)
         self.assertEqual(protocol.mute(True, tabs=[3]),
                          {"type": "mute", "muted": True, "tabs": [3]})
         self.assertEqual(protocol.mute(False), {"type": "mute", "muted": False, "site": "all"})

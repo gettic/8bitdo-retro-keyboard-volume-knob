@@ -93,10 +93,10 @@ def _check_audio(rep):
             audio.close()
     res, err = _in_thread(read_only)
     if err:
-        rep.add("core audio (read only)", False, repr(err))
+        rep.add("Windows audio (read only)", False, repr(err))
     else:
         n, names, master = res
-        rep.add("core audio (read only)", True,
+        rep.add("Windows audio (read only)", True,
                 f"{n} app sessions ({', '.join(names) or 'none'}), output device found: "
                 f"{master is not None}")
 
@@ -214,10 +214,10 @@ def _check_display(rep):
             u.close()
     res, err = _in_thread(run)
     if err:
-        rep.add("tray icon + pop-up (hidden)", False, repr(err))
+        rep.add("taskbar icon + volume pop-up (hidden)", False, repr(err))
         return
     hidden, tray, drawn = res
-    rep.add("tray icon + pop-up (hidden)", hidden and tray and drawn,
+    rep.add("taskbar icon + volume pop-up (hidden)", hidden and tray and drawn,
             f"windows hidden={hidden} tray={tray} drawn={drawn}")
 
 
@@ -239,6 +239,8 @@ def _check_spotify(rep, path=None, api_base=None, accounts=None):
     except api.ApiError as e:
         rep.add("spotify", False, e.reason)
         return
+    finally:
+        client.close()
     dev = p.get("device") if p else None
     if not isinstance(dev, dict):
         rep.add("spotify", True, "logged in; no active Spotify device right now")

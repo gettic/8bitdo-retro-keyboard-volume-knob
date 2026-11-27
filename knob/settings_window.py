@@ -37,6 +37,8 @@ _d(user32, "SetCursor", wt.HANDLE, wt.HANDLE)
 _d(user32, "LoadCursorW", wt.HANDLE, wt.HINSTANCE, ctypes.c_void_p)
 _d(user32, "IsIconic", wt.BOOL, wt.HWND)
 _d(user32, "GetWindowRect", wt.BOOL, wt.HWND, ctypes.POINTER(wt.RECT))
+_d(user32, "SetCapture", wt.HWND, wt.HWND)
+_d(user32, "ReleaseCapture", wt.BOOL)
 
 WS_CAPTION, WS_SYSMENU, WS_MINIMIZEBOX = 0x00C00000, 0x00080000, 0x00020000
 STYLE = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX   # fixed size, Windows' title bar
@@ -45,6 +47,7 @@ EX_STYLE = 0                                       # a normal window (taskbar, A
 WM_CLOSE, WM_PAINT, WM_ERASEBKGND, WM_SETCURSOR = 0x10, 0xF, 0x14, 0x20
 WM_SETTINGCHANGE, WM_THEMECHANGED, WM_DPICHANGED = 0x1A, 0x31A, 0x2E0
 WM_KEYDOWN, WM_MOUSEMOVE, WM_LBUTTONUP, WM_MOUSELEAVE = 0x100, 0x200, 0x202, 0x2A3
+WM_LBUTTONDOWN = 0x201
 VK_TAB, VK_RETURN, VK_SHIFT, VK_ESCAPE, VK_SPACE = 0x09, 0x0D, 0x10, 0x1B, 0x20
 VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 0x25, 0x26, 0x27, 0x28
 HTCLIENT, IDC_HAND = 1, 32649
@@ -80,7 +83,7 @@ FAILSAFE_LEVELS = tuple(round(k / 10, 1) for k in range(1, 11))
 
 
 def pct(v):
-    return f"{v * 100:.1f}".rstrip("0").rstrip(".") + " %"
+    return f"{v * 100:.1f}".rstrip("0").rstrip(".") + "%"
 
 
 def secs(v):
@@ -92,14 +95,14 @@ ROWS = [
     dict(kind="stepper", key="step", label="Each knob click changes the volume by",
          values=STEPS, fmt=pct),
     dict(kind="choice", key="spotify_control", label="Spotify volume",
-         sub="Spotify's own slider needs a one-time login",
+         sub="Its own slider needs a one-time login",
          options=(("web", "Spotify's own"), ("mixer", "Windows mixer"))),
     dict(kind="toggle", key="brave_fallback",
-         label="No Brave extension: change all of Brave's sound"),
+         label="Without the extension, change all of Brave's sound"),
     dict(kind="head", label="YouTube and YouTube Music"),
-    dict(kind="choice", key="boost_max", label="Can go louder than 100 %",
-         options=((1.0, "No"), (1.25, "125 %"), (1.5, "150 %")), fmt=pct),
-    dict(kind="toggle", key="failsafe", label="Turn tabs over 100 % down when they open",
+    dict(kind="choice", key="boost_max", label="Can go louder than 100%",
+         options=((1.0, "No"), (1.25, "125%"), (1.5, "150%")), fmt=pct),
+    dict(kind="toggle", key="failsafe", label="Turn tabs over 100% down when they open",
          sub="So a boosted video never starts too loud"),
     dict(kind="stepper", key="failsafe_level", label="Turn them down to",
          values=FAILSAFE_LEVELS, fmt=pct, needs="failsafe"),
@@ -117,9 +120,9 @@ KEYS = tuple(r["key"] for r in ROWS if r["kind"] != "head")
 FILE, RESET = "file", "reset"   # the footer link and the broken-file banner's button
 LINK_TEXT = "Open the settings file (advanced)"
 SAVED_TEXT = "Changes are saved right away"
-FAILED_TEXT = "Could not save the settings file"
-BANNER_TEXT = "The settings file has a mistake, so nothing can be saved here."
-BANNER_SUB = "Fix it in the file, or reset to the defaults (the old file is kept)."
+FAILED_TEXT = "Couldn't save. Try again, or see Open log"
+BANNER_TEXT = "Your settings file can't be read, so changes can't be saved."
+BANNER_SUB = "Fix the file, or reset to defaults (a copy of the old file is kept)."
 
 
 def _same(a, b):
@@ -489,6 +492,7 @@ class SettingsWindow:
         self.lay = None
         self.image = None    # (w, h, data) shown in WM_PAINT
         self._tracking = False
+        self._pressed = None  # target under the mouse-down (a click needs down + up on it)
 
     # --- open / close ---
     def reload(self):
@@ -691,11 +695,20 @@ class SettingsWindow:
                 user32.SetCursor(user32.LoadCursorW(None, IDC_HAND))
                 return 1
             return None
+        if msg == WM_LBUTTONDOWN:
+            self._pressed = hit(self.lay, _signed(lparam), _signed(lparam >> 16)) \
+                if self.lay else None
+            if self._pressed is not None:
+                user32.SetCapture(self.hwnd)
+            return 0
         if msg == WM_LBUTTONUP:
+            pressed, self._pressed = self._pressed, None
+            user32.ReleaseCapture()
             if self.lay:
                 target = hit(self.lay, _signed(lparam), _signed(lparam >> 16))
-                if target is not None:
-                    self.focus, self.focus_visible = target[0], False
+                if target is None or target != pressed:
+                    return 0  # only a press and release on the same item counts
+                self.focus, self.focus_visible = target[0], False
                 self.activate(target)
             return 0
         if msg == WM_KEYDOWN:

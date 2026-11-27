@@ -1,17 +1,20 @@
 """Per-user setup and uninstall.
 
-From source (python.org Python, no exe, no packages):
+From source (python.org Python 3.8+, no exe, no packages):
   py -I volume_knob.py --install
-      One admin box (shown as Python): only the copy runs elevated. It copies the program
-      and the Brave extension to C:\\Program Files\\8BitDo Volume Knob, waits, checks every
-      file is still there, and writes a result file. Then, as the normal user: a shortcut
-      in the user's Startup folder (pythonw.exe -I volume_knob.py), and start it.
+      One Windows permission box (shown as Python): only the copy runs elevated. It copies
+      the program and the Brave extension to C:\\Program Files\\8BitDo Volume Knob.new,
+      waits, checks every file is still there, then swaps it in item by item (the old
+      items go to ...Knob.old and the Recycle Bin; any failure puts everything back, so a
+      failed update never breaks the installed version). Then, as the normal user: stop
+      the running knob, a shortcut in the user's Startup folder (pythonw.exe -I
+      volume_knob.py), and start it.
       --run-value: start with Windows through the HKCU Run value instead of the shortcut.
   py -I "C:\\Program Files\\8BitDo Volume Knob\\volume_knob.py" --uninstall
-      Shortcut, Run value, logs and settings as the user, then one admin box to recycle
-      the folder (only if it holds setup's marker file).
-  Run from the installed copy itself, --install only registers again (no admin box).
---elevated-copy / --elevated-remove are internal: setup runs them through the admin box.
+      Shortcut, Run value, logs and settings as the user, then one permission box to
+      recycle the folder (only if it holds setup's marker file).
+  Run from the installed copy itself, --install only registers again (no permission box).
+--elevated-copy / --elevated-remove are internal: setup runs them through the box.
 Brave talks to the program over a local connection; there is no native-messaging host.
 Old host keys and files from earlier versions are cleaned up by install and uninstall.
 
@@ -34,7 +37,8 @@ import time
 import winreg
 
 APP = "8BitDo Volume Knob"
-DESCRIPTION = "8BitDo Retro Keyboard volume knob"
+DESCRIPTION = APP                           # the Startup shortcut's description
+MIN_PYTHON = (3, 8)                         # copytree(dirs_exist_ok=...) needs 3.8
 RUN_VALUE = APP
 SHORTCUT = APP + ".lnk"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -65,6 +69,17 @@ class SetupError(Exception):
     pass
 
 
+class Refused(SetupError):
+    """The user chose No in the Windows permission box."""
+
+
+class TookTooLong(SetupError):
+    """The step in the permission box didn't finish within ELEVATED_TIMEOUT."""
+
+
+NO_TEXT = "You chose No in the Windows permission box, so nothing was changed."
+
+
 # ---------------------------------------------------------------- where things go
 class Layout:
     """All paths setup writes. With a test root, nothing real is touched."""
@@ -90,6 +105,8 @@ class Layout:
         self.startup_dir = os.path.join(roaming, STARTUP)
         self.shortcut = os.path.join(self.startup_dir, SHORTCUT)
         self.program_dir = os.path.join(progfiles, APP)    # program + extension (admin copy)
+        self.program_new = self.program_dir + ".new"       # update: copied + checked here
+        self.program_old = self.program_dir + ".old"       # update: replaced items, recycled
         self.result_file = os.path.join(self.local_dir, "setup-result.json")
         self.run_key = self.reg_base + RUN_KEY
         self.approved_key = self.reg_base + APPROVED_KEY
@@ -99,6 +116,11 @@ class Layout:
     @property
     def test_key(self):
         return self.reg_base.rstrip("\\") if self.test else None
+
+
+def python_version():
+    """(major, minor) of the running Python (tests replace this)."""
+    return tuple(sys.version_info[:2])
 
 
 def python_exes():
@@ -151,14 +173,15 @@ def copy_program(src, dest):
         return
     check_source(src)
     os.makedirs(dest, exist_ok=True)
+    # Marker first: even a half-finished copy is recognisable as setup's own.
+    with open(os.path.join(dest, MARKER), "w", encoding="utf-8") as f:
+        f.write("Copied here by 8BitDo Volume Knob setup. Uninstall moves this folder to "
+                "the Recycle Bin.\n")
     for name in COPY_FILES:
         shutil.copy2(os.path.join(src, name), os.path.join(dest, name))
     for name in COPY_DIRS:
         shutil.copytree(os.path.join(src, name), os.path.join(dest, name),
                         ignore=shutil.ignore_patterns(*COPY_SKIP), dirs_exist_ok=True)
-    with open(os.path.join(dest, MARKER), "w", encoding="utf-8") as f:
-        f.write("Copied here by 8BitDo Volume Knob setup. Uninstall moves this folder to "
-                "the Recycle Bin.\n")
 
 
 def expected_files(src):
@@ -201,44 +224,127 @@ def _remove_path(layout, path):
     return recycle(path)
 
 
+def _error_text(e):
+    text = str(e) or type(e).__name__
+    if not isinstance(e, (OSError, SetupError)):
+        text = "%s: %s" % (type(e).__name__, text)
+    return text[:2000]
+
+
+def _top_names(rels):
+    return {rel.split(os.sep, 1)[0] for rel in rels}
+
+
+_rename = os.rename   # tests may replace it
+
+
+class SwapError(Exception):
+    def __init__(self, name, error):
+        super().__init__("%s (%s)" % (name, error))
+        self.name = name
+
+
+def swap_in(new, dest, old):
+    """Put the checked copy in new into dest. Fresh install: rename new to dest. Update:
+    item by item (dest itself may be the running knob's working folder, so it's never
+    renamed), dest's items to old first. Any failed move puts everything back and raises
+    SwapError naming the item in use."""
+    if not os.path.exists(dest):
+        _rename(new, dest)
+        return
+    incoming = sorted(os.listdir(new))
+    outgoing = sorted((set(incoming) | _top_names(OLD_PROGRAM_FILES)) &
+                      set(os.listdir(dest)))
+    os.makedirs(old)
+    moved_out, moved_in = [], []
+    name = None
+    try:
+        for name in outgoing:
+            _rename(os.path.join(dest, name), os.path.join(old, name))
+            moved_out.append(name)
+        for name in incoming:
+            _rename(os.path.join(new, name), os.path.join(dest, name))
+            moved_in.append(name)
+    except OSError as e:
+        for back in reversed(moved_in):
+            try:
+                _rename(os.path.join(dest, back), os.path.join(new, back))
+            except OSError:
+                pass
+        for back in reversed(moved_out):
+            try:
+                _rename(os.path.join(old, back), os.path.join(dest, back))
+            except OSError:
+                pass
+        raise SwapError(name, e.strerror or e)
+    os.rmdir(new)
+
+
+def _clear_leftovers(layout):
+    """Remove .new/.old folders an earlier run left behind. True if both are gone."""
+    ok = True
+    for path in (layout.program_new, layout.program_old):
+        if os.path.exists(path):
+            ok = _remove_path(layout, path) and ok
+    return ok
+
+
 def copy_and_verify(layout, src, dest, python, wait=None):
-    """The elevated step: copy, remove old-version leftovers, wait, check every file is
-    still there with the right size. On any loss the folder is removed again."""
+    """The elevated step: copy to <program>.new, wait, check every file is still there
+    with the right size, then swap it in. Any failure removes only .new: the installed
+    version is never touched."""
     if not _same(dest, layout.program_dir):
         raise SetupError("Refusing to copy to " + dest)
     _check_python(python)
     expected = expected_files(src)
+    new, old = layout.program_new, layout.program_old
+    if not _clear_leftovers(layout):
+        return {"ok": False, "step": "copy", "error": "could not clear " + new}
     try:
-        copy_program(src, dest)
-        for rel in OLD_PROGRAM_FILES:  # only what this version no longer ships
-            if rel not in expected and not any(k.startswith(rel + os.sep) for k in expected):
-                _remove_path(layout, os.path.join(dest, rel))
-    except (OSError, SetupError) as e:  # e.g. a file write refused: take it all back out
-        removed = _remove_path(layout, dest)
-        return {"ok": False, "step": "copy", "error": str(e)[:2000], "removed": removed}
+        copy_program(src, new)
+    except Exception as e:  # e.g. a file write refused: take the new copy back out
+        removed = _remove_path(layout, new)
+        return {"ok": False, "step": "copy", "error": _error_text(e), "removed": removed}
     time.sleep(VERIFY_WAIT if wait is None else wait)
     missing = [rel for rel, size in sorted(expected.items())
-               if not os.path.isfile(os.path.join(dest, rel))
-               or os.path.getsize(os.path.join(dest, rel)) != size]
-    if not os.path.isfile(os.path.join(dest, MARKER)):
+               if not os.path.isfile(os.path.join(new, rel))
+               or os.path.getsize(os.path.join(new, rel)) != size]
+    if not os.path.isfile(os.path.join(new, MARKER)):
         missing.append(MARKER)
     if missing:
-        removed = _remove_path(layout, dest)
+        removed = _remove_path(layout, new)
         return {"ok": False, "step": "copy", "missing": missing, "removed": removed,
                 "checked": len(expected)}
+    try:
+        swap_in(new, dest, old)
+    except SwapError as e:
+        _remove_path(layout, new)
+        _remove_path(layout, old)  # empty after the rollback
+        return {"ok": False, "step": "swap", "in_use": e.name, "error": str(e)}
+    _remove_path(layout, old)      # best effort; the next install clears it otherwise
     return {"ok": True, "step": "copy", "checked": len(expected)}
 
 
 def remove_guarded(layout, dest):
-    """The elevated uninstall step: only the exact program folder, only with the marker."""
+    """The elevated uninstall step: only the exact program folder, only with the marker
+    (plus .new/.old leftovers of an interrupted update, also only with the marker)."""
     if not _same(dest, layout.program_dir):
         return {"ok": False, "step": "remove", "error": "wrong folder: " + dest}
+    for extra in (layout.program_new, layout.program_old):
+        if os.path.isfile(os.path.join(extra, MARKER)):
+            _remove_path(layout, extra)
     if not os.path.exists(dest):
         return {"ok": True, "step": "remove", "note": "already gone"}
     if not (os.path.isfile(os.path.join(dest, MARKER)) and
             os.path.isfile(os.path.join(dest, "volume_knob.py"))):
         return {"ok": False, "step": "remove", "error": "no setup marker, folder left alone"}
     return {"ok": _remove_path(layout, dest), "step": "remove"}
+
+
+def has_copy(layout):
+    """True if setup's program copy (or a leftover of an interrupted update) is there."""
+    return any(os.path.isfile(os.path.join(p, MARKER))
+               for p in (layout.program_dir, layout.program_new, layout.program_old))
 
 
 # ---------------------------------------------------------------- the one admin box
@@ -274,15 +380,15 @@ def shell_runas(exe, params, folder, timeout):
     if not shell32.ShellExecuteExW(ctypes.byref(info)):
         err = ctypes.get_last_error()
         if err == ERROR_CANCELLED:
-            raise SetupError("The admin box was answered No. Nothing was changed.")
-        raise SetupError("Could not start the admin step (error %d)." % err)
+            raise Refused(NO_TEXT)
+        raise SetupError("Windows' permission box couldn't open (error %d). Try again." % err)
     k32 = ctypes.WinDLL("kernel32", use_last_error=True)
     k32.WaitForSingleObject.argtypes = (wt.HANDLE, wt.DWORD)
     k32.GetExitCodeProcess.argtypes = (wt.HANDLE, ctypes.POINTER(wt.DWORD))
     k32.CloseHandle.argtypes = (wt.HANDLE,)
     try:
         if k32.WaitForSingleObject(info.hProcess, int(timeout * 1000)) != 0:
-            raise SetupError("The admin step did not finish in time.")
+            raise TookTooLong("took too long")
         code = wt.DWORD()
         k32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
         return code.value
@@ -290,8 +396,9 @@ def shell_runas(exe, params, folder, timeout):
         k32.CloseHandle(info.hProcess)
 
 
-def run_elevated(layout, args):
-    """Run setup with args through one admin box; return its result dict."""
+def run_elevated(layout, args, what="Copying"):
+    """Run setup with args through one permission box; return its result dict.
+    what names the step in the error texts ("Copying took too long. Try again.")."""
     pythonw = python_exes()[1]
     # This file itself (stdlib only), not volume_knob.py: its entry only passes
     # --install/--uninstall on to setup.
@@ -303,14 +410,17 @@ def run_elevated(layout, args):
     if layout.test:
         full += ["--test-root", layout.root, "--wait", str(VERIFY_WAIT)]
     # Working folder outside the program folder, so the remove step doesn't hold it open.
-    shell_runas(pythonw, subprocess.list2cmdline(["-I", script] + full),
-                os.path.dirname(layout.local_dir), ELEVATED_TIMEOUT)
+    try:
+        shell_runas(pythonw, subprocess.list2cmdline(["-I", script] + full),
+                    os.path.dirname(layout.local_dir), ELEVATED_TIMEOUT)
+    except TookTooLong:
+        raise SetupError("%s took too long. Try again." % what)
     try:
         with open(layout.result_file, encoding="utf-8") as f:
             result = json.load(f)
         os.remove(layout.result_file)
     except (OSError, ValueError):
-        raise SetupError("The admin step left no result.")
+        raise SetupError("%s didn't finish. Try again." % what)
     return result
 
 
@@ -495,8 +605,10 @@ def remove_old_host(layout, notes):
     """Earlier versions' native-messaging host keys (and empty parents). Never fails."""
     software = layout.reg_base + "Software"
     for key in layout.old_host_keys:
-        if key_exists(key) and _try(notes, "old browser key HKCU\\" + key, _delete_key, key):
-            _try(notes, "empty key", _prune_empty, key.rsplit("\\", 1)[0], software)
+        if key_exists(key) and _try(notes, "an old browser entry from version 1.0",
+                                    _delete_key, key):
+            _try(notes, "an empty old browser entry", _prune_empty, key.rsplit("\\", 1)[0],
+                 software)
 
 
 def delete_test_tree(path):
@@ -604,31 +716,39 @@ def remove_shortcut(layout, notes):
 # ---------------------------------------------------------------- install / uninstall
 def install(layout, files, start=True, method="shortcut"):
     """Returns (notes, files actually used). method: "shortcut" (Startup folder, default)
-    or "run" (HKCU Run value). Run from the installed copy itself, no admin box."""
+    or "run" (HKCU Run value). Run from the installed copy itself, no permission box.
+    The running knob is stopped only once the new copy is in place."""
     notes = []
     source = files.get("source", False)
     if not source and not layout.test and in_temp(files["folder"]):
         raise SetupError("The program is in a temporary folder (probably still inside the "
                          "zip). Unzip the whole folder somewhere permanent first.")
     if not os.path.isfile(os.path.join(files["extension"], "manifest.json")):
-        raise SetupError("The 'extension' folder is missing next to the program.")
-
-    stop_program(layout, notes)
+        raise SetupError("The 'extension' folder is missing next to the program. Unzip the "
+                         "whole download again and run setup from there.")
 
     os.makedirs(layout.local_dir, exist_ok=True)
     if source:
         if _same(files["folder"], layout.program_dir) and \
                 os.path.isfile(os.path.join(layout.program_dir, MARKER)):
-            pass  # already the installed copy: just register again, no admin box
+            pass  # already the installed copy: just register again, no permission box
         else:
-            # The only elevated part: copy into Program Files, verified.
+            drive = network_drive(files["folder"])
+            if drive:
+                raise SetupError(
+                    "The program folder is on a network drive (%s). Windows' permission box "
+                    "can't see network drives. Copy the folder to this PC (for example "
+                    "Downloads) and run setup from there." % drive)
+            updating = os.path.isfile(os.path.join(layout.program_dir, MARKER))
+            # The only elevated part: copy into Program Files, verified, swapped in.
             result = run_elevated(layout, ["--elevated-copy", "--src", files["folder"],
                                            "--dest", layout.program_dir,
                                            "--python", files["python"]])
             if not result.get("ok"):
-                raise SetupError("Copying to %s failed, nothing was registered. %s"
-                                 % (layout.program_dir, json.dumps(result)))
+                raise SetupError(copy_failed_text(layout, result, updating))
         files = source_files(layout.program_dir, files["python"], files["pythonw"])
+
+    stop_program(layout, notes)  # only now: a refused or failed copy leaves it running
 
     # As the normal user. Leftovers of earlier versions first (best effort).
     remove_old_host(layout, notes)
@@ -644,11 +764,57 @@ def install(layout, files, start=True, method="shortcut"):
         write_shortcut(layout.shortcut, files["start"][0], shortcut_args(files),
                        files["folder"])
         if read_value(layout.run_key, RUN_VALUE) is not None:
-            _try(notes, "the old Run value", _delete_value, layout.run_key, RUN_VALUE)
+            _try(notes, "the old start-with-Windows entry", _delete_value, layout.run_key,
+                 RUN_VALUE)
+    if startup_disabled(layout, method):
+        notes.append("Start with Windows is turned off in Task Manager > Startup apps.")
 
     if start and not layout.test:
         start_program(files)
     return notes, files
+
+
+def copy_failed_text(layout, result, updating):
+    if result.get("step") == "swap":
+        text = ("A file of the installed version is in use (%s). Close Brave and run setup "
+                "again." % result.get("in_use"))
+    else:
+        detail = result.get("error") or (
+            "missing after the check: " + ", ".join(result.get("missing") or ["?"]))
+        text = ("Couldn't copy the program to %s, so nothing was changed. (%s)"
+                % (layout.program_dir, detail))
+    if updating:
+        text += " Your installed version still works."
+    return text
+
+
+DRIVE_REMOTE = 4
+
+
+def drive_type(root):
+    """GetDriveTypeW for a root like 'Z:\\' (tests replace this)."""
+    k32 = ctypes.WinDLL("kernel32")
+    k32.GetDriveTypeW.argtypes = (wt.LPCWSTR,)
+    k32.GetDriveTypeW.restype = wt.UINT
+    return k32.GetDriveTypeW(root)
+
+
+def network_drive(path):
+    """'Z:' if path is on a mapped network drive letter, else None (UNC paths work)."""
+    drive = os.path.splitdrive(os.path.abspath(path))[0]
+    if len(drive) != 2 or drive[1] != ":":
+        return None
+    return drive.upper() if drive_type(drive + "\\") == DRIVE_REMOTE else None
+
+
+def startup_disabled(layout, method):
+    """True if Task Manager has our startup entry turned off (Windows keeps that in
+    StartupApproved; the first byte is odd when off). Read only, never changed here."""
+    if method == "run":
+        value = read_value(layout.approved_key, RUN_VALUE)
+    else:
+        value = read_value(layout.approved_folder_key, SHORTCUT)
+    return isinstance(value, bytes) and len(value) > 0 and value[0] & 1 == 1
 
 
 def uninstall(layout):
@@ -661,18 +827,26 @@ def uninstall(layout):
             pass
 
     remove_shortcut(layout, notes)
-    for key, name in ((layout.run_key, RUN_VALUE), (layout.approved_key, RUN_VALUE),
-                      (layout.approved_folder_key, SHORTCUT)):
-        _try(notes, "HKCU\\%s value %s" % (key, name), _delete_value, key, name)
+    for key, name, what in (
+            (layout.run_key, RUN_VALUE, "the start-with-Windows entry"),
+            (layout.approved_key, RUN_VALUE, "the Startup approval entry"),
+            (layout.approved_folder_key, SHORTCUT, "the Startup approval entry")):
+        _try(notes, what, _delete_value, key, name)
     remove_old_host(layout, notes)
 
-    # Program Files copy: one admin box, only if setup's marker is there.
-    if os.path.isfile(os.path.join(layout.program_dir, MARKER)):
+    # Program Files copy: one permission box, only if setup's marker is there.
+    if has_copy(layout):
         try:
-            result = run_elevated(layout, ["--elevated-remove", "--dest", layout.program_dir])
+            result = run_elevated(layout, ["--elevated-remove", "--dest", layout.program_dir],
+                                  what="Removing the program folder")
+        except Refused:
+            result = None
+            notes.append("You chose No in the Windows permission box, so the program folder "
+                         "%s is still there. Run uninstall again to remove it."
+                         % layout.program_dir)
         except SetupError as e:
             result = {"ok": False, "error": str(e)}
-        if not result.get("ok"):
+        if result is not None and not result.get("ok"):
             notes.append("The program folder %s is still there (%s). Run uninstall again "
                          "to remove it." % (layout.program_dir, result.get("error", "failed")))
 
@@ -711,7 +885,8 @@ def _report(text, args, error=False):
 
 
 def _elevated(layout, args):
-    """Inside the admin box: no message boxes, the result goes to --result."""
+    """Inside the permission box: no message boxes, the result goes to --result.
+    Every error ends up in the result (nothing may crash without one)."""
     try:
         if not args.result or not args.dest:
             raise SetupError("missing --result/--dest")
@@ -722,8 +897,13 @@ def _elevated(layout, args):
             result = copy_and_verify(layout, args.src, args.dest, args.python, wait)
         else:
             result = remove_guarded(layout, args.dest)
-    except (SetupError, OSError) as e:
-        result = {"ok": False, "error": str(e)}
+    except Exception as e:
+        result = {"ok": False, "error": _error_text(e)}
+        if args.elevated_copy and _same(args.dest or "", layout.program_dir):
+            try:
+                _remove_path(layout, layout.program_new)
+            except Exception:
+                pass
     if args.result:
         try:
             tmp = args.result + ".new"
@@ -761,32 +941,39 @@ def run(argv):
     layout = Layout(args.test_root)
     if args.elevated_copy or args.elevated_remove:
         return _elevated(layout, args)
+    have = python_version()
+    if have < MIN_PYTHON:
+        _report("Setup failed: 8BitDo Volume Knob needs Python %d.%d or newer (this is %d.%d). "
+                "Get it from python.org." % (MIN_PYTHON + tuple(have)), args, error=True)
+        return 1
     try:
         if args.install:
             notes, files = install(layout, program_files(), start=not args.no_start,
                                    method="run" if args.run_value else "shortcut")
             if files.get("source"):
                 update = ("To update later: run setup again from the new version's folder:  "
-                          "py -I volume_knob.py --install  (one admin box)\n"
-                          "To uninstall:  py -I \"%s\" --uninstall  (one admin box)"
-                          % os.path.join(layout.program_dir, "volume_knob.py"))
+                          "py -I volume_knob.py --install  (one Windows permission box)\n"
+                          "To uninstall:  py -I \"%s\" --uninstall  (one Windows permission "
+                          "box)" % os.path.join(layout.program_dir, "volume_knob.py"))
             else:
                 update = "To update later: put the new version in the same folder and " \
                          "run --install again."
-            text = ("8BitDo Volume Knob is set up%s and starts with Windows.\n\n"
+            text = ("8BitDo Volume Knob is installed%s It starts with Windows.\n\n"
                     "One step left for YouTube in Brave:\n"
                     "1. Open brave://extensions\n"
                     "2. Turn on Developer mode\n"
                     "3. Click Load unpacked and choose this folder:\n%s\n\n%s"
-                    % ("" if args.no_start or layout.test else ", running",
+                    % ("." if args.no_start or layout.test else " and running.",
                        files["extension"], update))
         else:
-            had_copy = os.path.isfile(os.path.join(layout.program_dir, MARKER))
+            had_copy = has_copy(layout)
             notes = uninstall(layout)
+            left = (not had_copy) and os.path.exists(layout.program_dir)
             text = ("8BitDo Volume Knob is removed (settings and logs are in the Recycle "
                     "Bin).\n\nStill to do by hand: remove the extension in "
                     "brave://extensions" +
-                    ("." if had_copy else ", and delete the program folder."))
+                    (", and delete the program folder %s." % layout.program_dir
+                     if left else "."))
     except (SetupError, OSError) as e:
         _report("Setup failed: %s" % e, args, error=True)
         return 1
