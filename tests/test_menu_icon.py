@@ -10,7 +10,8 @@ from tests.fakes import settings
 from tests.test_display import FakeShell
 
 ITEMS = ui.menu_items(False)          # head, sep, Pause, Open log, Open settings, sep, Quit
-PAUSE, LOG, SETTINGS, QUIT = 2, 3, 4, 6
+ROW_I, PAUSE, LOG, SETTINGS, QUIT = 1, 3, 4, 5, 7   # head, row, sep, ..., sep, Quit
+MUTE_K = 4                                          # the speaker button in the row
 
 
 def px(data, size, x, y):
@@ -94,7 +95,7 @@ class MenuLogicTests(unittest.TestCase):
     def test_layout_and_hit(self):
         w, h, rows = menu.layout(ITEMS, 1.0)
         self.assertEqual(w, 230)
-        self.assertEqual(h, 4 + 32 + 9 + 32 * 3 + 9 + 32 + 4)
+        self.assertEqual(h, 4 + 32 + 40 + 9 + 32 * 3 + 9 + 32 + 4)
         top, rh = rows[PAUSE]
         self.assertEqual(menu.hit(ITEMS, rows, w, 50, top + 5), PAUSE)
         self.assertIsNone(menu.hit(ITEMS, rows, w, 50, rows[0][0] + 5))    # heading
@@ -104,11 +105,88 @@ class MenuLogicTests(unittest.TestCase):
         self.assertEqual((w2, h2), (345, int(round(h * 1.5))))
 
     def test_keyboard_steps(self):
-        self.assertEqual(menu.step(ITEMS, None, 1), PAUSE)
+        self.assertEqual(menu.step(ITEMS, None, 1), (ROW_I, 0))
         self.assertEqual(menu.step(ITEMS, None, -1), QUIT)
         self.assertEqual(menu.step(ITEMS, SETTINGS, 1), QUIT)     # skips the separator
-        self.assertEqual(menu.step(ITEMS, QUIT, 1), PAUSE)        # wraps
-        self.assertEqual(menu.step(ITEMS, PAUSE, -1), QUIT)
+        self.assertEqual(menu.step(ITEMS, QUIT, 1), (ROW_I, 0))   # wraps onto the row
+        self.assertEqual(menu.step(ITEMS, (ROW_I, 2), 1), PAUSE)
+        self.assertEqual(menu.step(ITEMS, PAUSE, -1), (ROW_I, 0))
+        marked = ui.menu_items(False, level=0.72)
+        self.assertEqual(menu.step(marked, PAUSE, -1), (ROW_I, 2))  # enters on 75 %
+
+    def test_row_left_right_and_commands(self):
+        self.assertEqual(menu.side(ITEMS, (ROW_I, 0), 1), (ROW_I, 1))
+        self.assertEqual(menu.side(ITEMS, (ROW_I, 0), -1), (ROW_I, MUTE_K))   # wraps
+        self.assertEqual(menu.side(ITEMS, (ROW_I, 3), 1), (ROW_I, MUTE_K))    # onto mute
+        self.assertEqual(menu.side(ITEMS, (ROW_I, MUTE_K), 1), (ROW_I, 0))
+        self.assertEqual(menu.side(ITEMS, PAUSE, 1), PAUSE)              # not in the row
+        self.assertEqual([menu.target_cmd(ITEMS, (ROW_I, k)) for k in range(5)],
+                         [125, 150, 175, 200, ui.CMD_MUTE])
+        self.assertEqual(menu.target_cmd(ITEMS, PAUSE), ui.CMD_PAUSE)
+        self.assertIsNone(menu.target_cmd(ITEMS, 0))
+
+    def test_mark_closest_and_boost(self):
+        info = lambda lv: ui.quick_row(lv)[1]
+        self.assertIsNone(info(None)["mark"])
+        self.assertEqual([info(v)["mark"] for v in (0.0, 0.3, 0.49, 0.72, 0.9, 1.0)],
+                         [0, 0, 1, 2, 3, 3])
+        self.assertEqual((info(1.35)["mark"], info(1.35)["boosted"]), (3, True))
+        self.assertFalse(info(1.0)["boosted"])
+
+    def test_mute_button_label_and_state(self):
+        on, off = ui.quick_row(0.72, muted=True)[1], ui.quick_row(0.72)[1]
+        self.assertEqual(off["buttons"][MUTE_K], (ui.CMD_MUTE, "Mute", menu.ICON_SPEAKER))
+        self.assertEqual(on["buttons"][MUTE_K], (ui.CMD_MUTE, "Unmute", menu.ICON_MUTED))
+        self.assertEqual(off["mark"], 2)                       # 75 % outlined
+        self.assertEqual(on["mark"], MUTE_K)                   # no % outline, mute outlined
+        boosted = ui.quick_row(1.35, muted=True)[1]
+        self.assertEqual((boosted["mark"], boosted["boosted"]), (MUTE_K, False))
+        self.assertEqual(ui.menu_items(False, level=0.5, muted=True)[ROW_I][1]["mark"], MUTE_K)
+
+    def test_mute_button_drawn_and_outlined(self):
+        def button(items, k, light):
+            """(left-edge pixel, inner pixels) of button k, as (r, g, b)."""
+            w, h, data = menu.render(items, None, 1.0, light)
+            _, _, rows = menu.layout(items)
+            top, rh = rows[ROW_I]
+            bx, by, bw, bh = (int(v) for v in menu.button_rects(w, top, rh, 1.0, 5)[k])
+            pix = lambda x, y: tuple(data[(y * w + x) * 4:(y * w + x) * 4 + 3][::-1])
+            inner = [pix(x, y) for y in range(by + 3, by + bh - 3)
+                     for x in range(bx + 3, bx + bw - 3)]
+            return pix(bx + 1, by + bh // 2), inner   # +1: inside the outline
+        for light in (False, True):
+            hexc = (menu.LIGHT if light else menu.DARK)["accent"]
+            accent = tuple(int(hexc[i:i + 2], 16) for i in (1, 3, 5))
+            plain = ui.menu_items(False, level=0.72)
+            muted = ui.menu_items(False, level=0.72, muted=True)
+            edge_off, icon_off = button(plain, MUTE_K, light)
+            edge_on, icon_on = button(muted, MUTE_K, light)
+            self.assertNotEqual(edge_off, accent)             # not outlined while not muted
+            self.assertEqual(edge_on, accent)                 # outlined when muted
+            self.assertNotEqual(icon_off, icon_on)            # speaker vs muted speaker
+            self.assertGreater(len(set(icon_off)), 2)         # something drawn on it
+            self.assertEqual(button(plain, 2, light)[0], accent)     # 75 % outlined ...
+            self.assertNotEqual(button(muted, 2, light)[0], accent)  # ... not when muted
+
+    def test_mute_icon_fallback_shape(self):
+        old = menu._icon_face_cache[:]
+        menu._icon_face_cache[:] = [None]                      # no icon font installed
+        try:
+            a = menu.render(ui.menu_items(False), None)[2]
+            b = menu.render(ui.menu_items(False, muted=True), None)[2]
+        finally:
+            menu._icon_face_cache[:] = old
+        self.assertNotEqual(a, b)
+
+    def test_row_hit(self):
+        w, h, rows = menu.layout(ITEMS, 1.5)
+        top, rh = rows[ROW_I]
+        rects = menu.button_rects(w, top, rh, 1.5, 5)
+        for k, (bx, by, bw, bh) in enumerate(rects):
+            self.assertEqual(menu.hit(ITEMS, rows, w, bx + bw / 2, by + bh / 2, 1.5), (ROW_I, k))
+        bx, by, bw, bh = rects[0]
+        self.assertIsNone(menu.hit(ITEMS, rows, w, bx + bw + 1, by + 5, 1.5))   # in the gap
+        self.assertLessEqual(rects[-1][0] + rects[-1][2], w)
 
     def test_position(self):
         work = (0, 0, 1920, 1032)
@@ -193,6 +271,8 @@ class MenuWindowTests(unittest.TestCase):
 
     def test_keyboard(self):
         self.m.handle(menu.WM_KEYDOWN, menu.VK_DOWN, 0)
+        self.assertEqual(self.m.hover, (ROW_I, 0))              # the row (nothing marked)
+        self.m.handle(menu.WM_KEYDOWN, menu.VK_DOWN, 0)
         self.m.handle(menu.WM_KEYDOWN, menu.VK_DOWN, 0)
         self.assertEqual(self.m.hover, LOG)
         self.m.handle(menu.WM_KEYDOWN, menu.VK_UP, 0)
@@ -244,6 +324,40 @@ class MenuWindowTests(unittest.TestCase):
             self.tick(2)
         self.assertTrue(self.m.visible)
 
+    def test_click_row_button(self):
+        top, rh = self.m.rows[ROW_I]
+        bx, by, bw, bh = menu.button_rects(self.m.width, top, rh, 1.0, 5)[1]
+        self.m.handle(menu.WM_MOUSEMOVE, 0, lp(int(bx + 5), int(by + 5)))
+        self.assertEqual(self.m.hover, (ROW_I, 1))
+        self.m.handle(menu.WM_LBUTTONUP, 0, lp(int(bx + 5), int(by + 5)))
+        self.assertEqual(self.chosen, [150])
+        self.assertFalse(self.m.visible)
+
+    def test_keyboard_in_row(self):
+        for key in (menu.VK_DOWN, menu.VK_RIGHT, menu.VK_RIGHT, menu.VK_RETURN):
+            self.m.handle(menu.WM_KEYDOWN, key, 0)
+        self.assertEqual(self.chosen, [175])
+
+    def test_click_mute_button(self):
+        top, rh = self.m.rows[ROW_I]
+        bx, by, bw, bh = menu.button_rects(self.m.width, top, rh, 1.0, 5)[MUTE_K]
+        self.m.handle(menu.WM_MOUSEMOVE, 0, lp(int(bx + bw / 2), int(by + bh / 2)))
+        self.assertEqual(self.m.hover, (ROW_I, MUTE_K))
+        self.m.handle(menu.WM_LBUTTONUP, 0, lp(int(bx + bw / 2), int(by + bh / 2)))
+        self.assertEqual(self.chosen, [ui.CMD_MUTE])
+
+    def test_keyboard_reaches_mute(self):
+        for key in (menu.VK_DOWN, menu.VK_LEFT, menu.VK_RETURN):    # row, wrap left onto mute
+            self.m.handle(menu.WM_KEYDOWN, key, 0)
+        self.assertEqual(self.chosen, [ui.CMD_MUTE])
+
+    def test_keyboard_enters_muted_row_on_mute(self):
+        self.m.close()
+        self.m.open(ui.menu_items(False, level=0.5, muted=True), (1800, 1050))
+        for key in (menu.VK_DOWN, menu.VK_RETURN):
+            self.m.handle(menu.WM_KEYDOWN, key, 0)
+        self.assertEqual(self.chosen, [ui.CMD_MUTE])
+
     def test_mouse_leave_clears_hover(self):
         self.m.handle(menu.WM_MOUSEMOVE, 0, lp(50, self.y_of(QUIT)))
         self.m.handle(menu.WM_MOUSELEAVE, 0, 0)
@@ -279,6 +393,17 @@ class UiMenuTests(unittest.TestCase):
     def test_menu_window_hidden_with_style(self):
         self.assertFalse(user32.IsWindowVisible(self.ui.menu.hwnd))
         self.assertEqual(self.ui.tray.icons.maker.__class__.__name__, "function")
+
+    def test_menu_window_has_arrow_cursor(self):
+        # no class cursor -> the busy/app-starting cursor stayed over the menu
+        u32 = ctypes.WinDLL("user32", use_last_error=True)  # own copy: own argtypes
+        u32.GetClassLongPtrW.restype = ctypes.c_void_p
+        u32.GetClassLongPtrW.argtypes = (wt.HWND, ctypes.c_int)
+        u32.LoadCursorW.restype = ctypes.c_void_p
+        u32.LoadCursorW.argtypes = (wt.HINSTANCE, ctypes.c_void_p)
+        arrow = u32.LoadCursorW(None, ui.IDC_ARROW)
+        self.assertTrue(arrow)
+        self.assertEqual(u32.GetClassLongPtrW(self.ui.menu.hwnd, -12), arrow)  # GCLP_HCURSOR
 
     def test_right_click_opens_at_point_and_choice_runs(self):
         self.ui.tray.v4 = True
@@ -320,6 +445,40 @@ class UiMenuTests(unittest.TestCase):
         self.assertTrue(self.ui.menu.visible)
         self.assertEqual(len(self.opened), 2)
 
+    def test_quick_set_command_goes_to_controller(self):
+        keys = []
+        self.ui.on_key = keys.append
+        self.ui.command(150)
+        self.ui.command(200)
+        self.assertEqual(keys, [("set", 0.5), ("set", 1.0)])
+
+    def test_menu_marks_current_volume(self):
+        from knob.display import Row
+        self.ui.rows = [Row("YouTube", 1.35, False, 1.5)]
+        self.ui.open_menu((1700, 1060))
+        info = self.ui.menu.items[ROW_I][1]
+        self.assertEqual((info["mark"], info["boosted"]), (3, True))
+        self.assertEqual(info["buttons"][MUTE_K][1], "Mute")
+
+    def test_mute_command_is_the_mute_key(self):
+        keys = []
+        self.ui.on_key = keys.append
+        self.ui.command(ui.CMD_MUTE)
+        self.assertEqual(keys, ["mute"])          # same path as the knob's Mute key
+
+    def test_menu_shows_unmute_only_when_all_muted(self):
+        from knob.display import Row
+        self.ui.rows = [Row("Spotify", 0.4, True, 1.0), Row("YouTube", 0.6, False, 1.5)]
+        self.ui.open_menu((1700, 1060))
+        info = self.ui.menu.items[ROW_I][1]
+        self.assertEqual((info["buttons"][MUTE_K][1], info["mark"]), ("Mute", 1))
+        self.ui.menu.close()
+        self.ui.menu.closed_at = None
+        self.ui.rows = [Row("Spotify", 0.4, True, 1.0), Row("YouTube", 0.6, True, 1.5)]
+        self.ui.open_menu((1700, 1060))
+        info = self.ui.menu.items[ROW_I][1]
+        self.assertEqual((info["buttons"][MUTE_K][1], info["mark"]), ("Unmute", MUTE_K))
+
     def test_style_setting(self):
         self.ui.close()
         u = ui.Ui(settings(tray_style="knob"), on_quit=lambda: None, notify=self.shell,
@@ -336,6 +495,101 @@ class UiMenuTests(unittest.TestCase):
             self.assertEqual(made, [bytes(ui.icon_pixels(16, 45))])
         finally:
             u.close()
+
+
+class QuickSetControllerTests(unittest.TestCase):
+    """Controller.set_level with fake audio, fake browser link, fake Spotify."""
+
+    def setUp(self):
+        from knob.controller import Controller
+        from tests.fakes import (FakeAudio, FakeClock, FakeSession, ProcessList, connect_host,
+                                 make_bridge)
+        self.clock = FakeClock()
+        self.bridge, self.rec = make_bridge(self.clock)
+        self.connect = connect_host
+        self.spotify = FakeSession("spotify.exe", volume=0.4, muted=True)
+        self.audio = FakeAudio([self.spotify])
+        self.shown = []
+        self.make = lambda sp=None: Controller(
+            settings(), lambda: self.audio, self.bridge, clock=self.clock,
+            process_lister=ProcessList(), display=lambda r, p: self.shown.append((r, p)),
+            spotify=sp)
+        self.ctl = self.make()
+        self.ctl.audio = self.audio
+
+    def tab(self, tid, playing, volume=0.5, muted=False):
+        return {"tab": tid, "site": "youtube", "playing": playing, "volume": volume,
+                "muted": muted, "max_volume": 1.5, "boost": "on"}
+
+    def test_playing_tab_only_boost_dropped_and_unmuted(self):
+        self.connect(self.bridge, 1, [self.tab(7, True, 1.35, muted=True), self.tab(8, False)])
+        self.ctl.poll()
+        self.ctl.on_event(("set", 0.5))
+        sent = [m for _, m in self.rec.sent if m["type"] != "hello"]
+        self.assertEqual(sent, [{"type": "mute", "muted": False, "tabs": [7]},
+                                {"type": "set_volume", "volume": 0.5, "tabs": [7]}])
+        self.assertEqual(self.spotify._volume, 0.4)          # not playing: untouched
+        rows, popup = self.shown[-1]
+        self.assertTrue(popup)
+        self.assertEqual((rows[0].name, rows[0].level, rows[0].muted), ("YouTube", 0.5, False))
+
+    def test_nothing_playing_sets_both(self):
+        self.connect(self.bridge, 1, [self.tab(7, False)])
+        self.ctl.poll()
+        self.ctl.on_event(("set", 0.75))
+        self.assertEqual((self.spotify._volume, self.spotify._muted), (0.75, False))
+        self.assertEqual(self.rec.sent[-1][1]["type"], "set_volume")
+        self.assertEqual([r.name for r in self.shown[-1][0]], ["Spotify", "YouTube"])
+
+    def test_spotify_web_bar(self):
+        from tests.test_spotify import FakeSpotifyVolume
+
+        class Web(FakeSpotifyVolume):
+            def set_to(self, level):
+                self.set = level
+                self._level = level
+                return level
+        sp = Web(level=0.4)
+        ctl = self.make(sp)
+        ctl.audio = self.audio
+        self.spotify._peak = 0.3
+        ctl.poll()
+        ctl.on_event(("set", 1.0))
+        self.assertEqual(sp.set, 1.0)
+        self.assertEqual(self.spotify._volume, 0.4)          # mixer volume untouched
+        self.assertFalse(self.spotify._muted)                 # mixer mute cleared
+
+    def test_spotify_web_unknown_falls_back_to_mixer(self):
+        from tests.test_spotify import FakeSpotifyVolume
+
+        class Unknown(FakeSpotifyVolume):
+            def set_to(self, level):
+                return None
+        ctl = self.make(Unknown())
+        ctl.audio = self.audio
+        self.spotify._peak = 0.3
+        ctl.poll()
+        ctl.on_event(("set", 0.25))
+        self.assertEqual(self.spotify._volume, 0.25)
+
+
+from tests import test_spotify as _ts  # noqa: E402  (fake Spotify on a local port)
+
+
+class SpotifySetToTests(_ts.Base):
+    def test_set_to(self):
+        self.login_file("dev-pc")
+        v = _ts.api.SpotifyVolume(self.path, self.fake.api, self.fake.accounts, pc_name=_ts.PC,
+                                  tick=0.01)
+        self.addCleanup(v.close)
+        self.assertIsNone(v.set_to(0.5))           # volume not known yet: nothing queued
+        v.start()
+        v.set_present(True)
+        self.assertTrue(_ts.wait_for(v.usable))
+        self.assertAlmostEqual(v.set_to(0.75), 0.75)
+        self.assertTrue(_ts.wait_for(lambda: self.fake.volume == 75))
+        self.assertAlmostEqual(v.set_to(1.4), 1.0)  # no boost for Spotify
+        self.assertTrue(_ts.wait_for(lambda: self.fake.volume == 100))
 
 
 if __name__ == "__main__":

@@ -134,11 +134,10 @@ class Controller:
             allowed.discard(BRAVE)  # never touch Brave's sound while the extension does it
         return [s for s in self._sessions if s.exe in allowed]
 
-    def handle(self, action):
-        now = self.clock()
-        sessions = self._active_sessions(now)
+    def _targets(self, now):
+        """(sessions by exe, [router.AppSource], [browser.Tab]) the knob may change."""
         by_exe = {}
-        for s in sessions:
+        for s in self._active_sessions(now):
             by_exe.setdefault(s.exe, []).append(s)
         apps = []
         for exe, group in by_exe.items():
@@ -147,7 +146,51 @@ class Controller:
             except OSError:
                 muted = False
             apps.append(router.AppSource(exe, self.activity.is_playing(exe, now), muted))
-        tabs = self.bridge.state.tabs(now)
+        return by_exe, apps, self.bridge.state.tabs(now)
+
+    def set_level(self, level):
+        """Tray menu 25/50/75/100 %: set the knob's target (playing app, else
+        all) to exactly `level`, unmuted; a boosted tab drops to it."""
+        now = self.clock()
+        level = min(1.0, max(0.0, float(level)))
+        by_exe, apps, tabs = self._targets(now)
+        d = router.decide("up", apps, tabs, self.settings["step"])  # only the targets matter
+        log.debug("set %.2f -> %r", level, d)
+        for exe in d.apps:
+            web = self._spotify_web(exe)
+            for s in by_exe[exe]:
+                try:
+                    if s.muted():
+                        s.set_mute(False)
+                    if not web:
+                        s.set_volume(level)
+                except OSError:
+                    self._refreshed = None
+            if web and self.spotify.set_to(level) is None:
+                for s in by_exe[exe]:  # Spotify's own volume not known yet: mixer instead
+                    try:
+                        s.set_volume(level)
+                    except OSError:
+                        self._refreshed = None
+        by_key = {(t.client, t.tab): t for t in tabs}
+        for client, ids in d.tabs.items():
+            if "set_volume" not in (self.bridge.features(client) or ()):
+                log.warning("host %s cannot set an exact volume; tabs left as they are", client)
+                continue
+            muted = [tid for tid in ids if by_key[(client, tid)].muted]
+            if muted:
+                self.bridge.command(client, protocol.mute(False, tabs=muted))
+            self.bridge.command(client, protocol.set_volume(level, tabs=ids))
+            for tid in ids:
+                self._guess[(client, tid)] = (level, False, now)
+        if not d.empty():
+            self._shown = self._sources(d, by_key)
+            self.update_display(popup=True)
+        return d
+
+    def handle(self, action):
+        now = self.clock()
+        by_exe, apps, tabs = self._targets(now)
         d = router.decide(action, apps, tabs, self.settings["step"])
         log.debug("key %s -> %r", action, d)
         for exe in d.apps:
@@ -309,6 +352,9 @@ class Controller:
 
     def on_event(self, event):
         now = self.clock()
+        if event[0] == "set":  # tray menu 25/50/75/100 % (ui.Ui via press)
+            self.set_level(event[1])
+            return
         if event[0] == "spotify":  # Spotify's own volume / Web API state changed
             self.update_display()
             return

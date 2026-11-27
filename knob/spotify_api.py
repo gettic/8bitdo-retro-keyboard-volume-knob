@@ -423,6 +423,16 @@ class SpotifyVolume:
             self._cond.notify_all()
             return None if self._known is None else _clamp(self._base() + self._pending)
 
+    def set_to(self, level):
+        """Queue an exact volume (tray menu 25/50/75/100 %). Returns the volume
+        to show, or None when Spotify's volume isn't known yet (nothing queued)."""
+        with self._cond:
+            if self._known is None:
+                return None
+            self._pending = _clamp(level) - self._base()
+            self._cond.notify_all()
+            return _clamp(self._base() + self._pending)
+
     # ---- worker ----
     def _base(self):
         if self._exact is not None and round(self._exact * 100) == round(self._known * 100):

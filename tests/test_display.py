@@ -442,7 +442,7 @@ class UiWindowTests(unittest.TestCase):
         self.assertIn("paused", self.shell.calls[-1][1])
         items = ui.menu_items(True)
         self.assertEqual([t for c, t, e in items if c == ui.CMD_PAUSE], ["Resume"])
-        self.assertEqual([t for c, t, e in ui.menu_items(False)][2:5],
+        self.assertEqual([t for c, t, e in ui.menu_items(False)][3:6],
                          ["Pause", "Open log", "Open settings"])
         self.ui.keys_status(False, False)
         self.assertIn("in use", self.shell.calls[-1][1])

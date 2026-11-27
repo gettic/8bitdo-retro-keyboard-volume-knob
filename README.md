@@ -38,6 +38,8 @@ Right-click the icon for this menu. It is dark in Windows dark mode and light in
 
 | Item | What it does |
 |---|---|
+| 25% 50% 75% 100% | Sets the volume of what the knob would change (the playing app, else all of them). The volume card shows the result. The closest button is outlined, in orange when the volume is boosted above 100 %. |
+| Speaker button (end of that row) | Mutes or unmutes, like the knob's Mute key. When everything is muted it shows a crossed-out speaker with an outline. |
 | Pause / Resume | Pause gives the volume keys back to Windows until you press Resume or the program starts again. |
 | Open log | Opens the log in Notepad. |
 | Open settings | Opens the settings file in Notepad. |
@@ -238,7 +240,7 @@ python -E -s -m unittest setup_knob.test_setup
 Build the release zip (no packages needed):
 
 ```
-python -I make_release.py --version 1.3.0
+python -I make_release.py --version 1.4.0
 ```
 
 ## License

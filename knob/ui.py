@@ -79,10 +79,12 @@ _d(user32, "GetSystemMetrics", ctypes.c_int, ctypes.c_int)
 _d(user32, "CreateIconIndirect", wt.HICON, ctypes.POINTER(ICONINFO))
 _d(user32, "DestroyIcon", wt.BOOL, wt.HICON)
 _d(user32, "ChangeWindowMessageFilterEx", wt.BOOL, wt.HWND, wt.UINT, wt.DWORD, ctypes.c_void_p)
+_d(user32, "LoadCursorW", wt.HANDLE, wt.HINSTANCE, ctypes.c_void_p)
 _d(shell32, "Shell_NotifyIconW", wt.BOOL, wt.DWORD, ctypes.POINTER(NOTIFYICONDATAW))
 _d(kernel32, "GetModuleHandleW", wt.HMODULE, wt.LPCWSTR)
 
 CLASS_NAME = "8BitDoVolumeKnob.Window"
+IDC_ARROW = 32512  # class cursor: without one the cursor over the menu keeps its old shape
 WM_DESTROY, WM_CLOSE, WM_TIMER, WM_HOTKEY = 0x2, 0x10, 0x113, 0x312
 WM_NULL, WM_MOUSEACTIVATE, MA_NOACTIVATE = 0x0, 0x21, 3
 WM_CONTEXTMENU, WM_RBUTTONUP = 0x7B, 0x205
@@ -97,7 +99,7 @@ SM_CXSMICON = 49
 MF_STRING, MF_GRAYED, MF_SEPARATOR = 0x0, 0x1, 0x800
 TPM_RIGHTBUTTON, TPM_RETURNCMD, TPM_NONOTIFY = 0x2, 0x100, 0x80
 MSGFLT_ALLOW = 1
-CMD_PAUSE, CMD_LOG, CMD_SETTINGS, CMD_QUIT = 1, 2, 3, 4
+CMD_PAUSE, CMD_LOG, CMD_SETTINGS, CMD_QUIT, CMD_MUTE = 1, 2, 3, 4, 5
 ICON_CACHE = 64
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = -4
 
@@ -388,12 +390,35 @@ def open_file(path):
             os.startfile(folder)
 
 
-def menu_items(paused, keys_ok=True):
-    """[(command id or None for a separator, text, enabled)]."""
+QUICK_LEVELS = (25, 50, 75, 100)
+CMD_SET_BASE = 100  # command 125 = set 25 %, ... 200 = set 100 %
+
+
+def quick_row(level=None, muted=False):
+    """The 25/50/75/100 % row plus a speaker (mute) button. The % button
+    closest to `level` (0-1.5) is marked, orange-marked (100) when boosted
+    above 100 %; when muted the speaker button is marked instead."""
+    mark = None
+    if muted:
+        mark = len(QUICK_LEVELS)
+    elif level is not None:
+        lv = min(level, 1.0) * 100
+        mark = min(range(len(QUICK_LEVELS)), key=lambda k: abs(QUICK_LEVELS[k] - lv))
+    buttons = [(CMD_SET_BASE + v, f"{v}%") for v in QUICK_LEVELS]
+    buttons.append((CMD_MUTE, "Unmute" if muted else "Mute",
+                    menu.ICON_MUTED if muted else menu.ICON_SPEAKER))
+    return (menu.ROW, {"buttons": buttons, "mark": mark,
+                       "boosted": not muted and level is not None and level > 1.0 + 1e-9},
+            True)
+
+
+def menu_items(paused, keys_ok=True, level=None, muted=False):
+    """[(command id or None for a separator, text, enabled)]; the second line
+    is the quick-volume row (menu.ROW) with the mute button."""
     head = f"{view.TITLE} {VERSION}"
     if not keys_ok and not paused:
         head += " (volume keys in use)"
-    return [(0, head, False), (None, "", False),
+    return [(0, head, False), quick_row(level, muted), (None, "", False),
             (CMD_PAUSE, "Resume" if paused else "Pause", True),
             (CMD_LOG, "Open log", True),
             (CMD_SETTINGS, "Open settings", True),
@@ -451,6 +476,7 @@ class Ui:
         wc.lpfnWndProc = self._proc
         wc.hInstance = self._hinst
         wc.lpszClassName = CLASS_NAME
+        wc.hCursor = user32.LoadCursorW(None, IDC_ARROW)
         if not user32.RegisterClassExW(ctypes.byref(wc)):
             raise OSError(f"RegisterClassExW failed ({ctypes.get_last_error()})")
         try:
@@ -557,7 +583,13 @@ class Ui:
             self.osd.redraw(rows)
 
     def command(self, cmd):
-        if cmd == CMD_PAUSE:
+        if CMD_SET_BASE < cmd <= CMD_SET_BASE + 100:
+            if self.on_key:  # controller.press: ("set", level) -> Controller.set_level
+                self.on_key(("set", (cmd - CMD_SET_BASE) / 100.0))
+        elif cmd == CMD_MUTE:
+            if self.on_key:  # same as the knob's Mute key (playing app, else all)
+                self.on_key("mute")
+        elif cmd == CMD_PAUSE:
             if self.on_pause:
                 self.on_pause(not self.paused)
         elif cmd == CMD_LOG and self.log_path:
@@ -588,7 +620,10 @@ class Ui:
             pt = wt.POINT()
             user32.GetCursorPos(ctypes.byref(pt))
             anchor = (pt.x, pt.y)
-        self.menu.open(menu_items(self.paused, self.keys_ok), anchor)
+        level = self.rows[0].level if self.rows else None
+        # "muted" only when everything on the card is: the Mute key then unmutes
+        muted = bool(self.rows) and all(r.muted for r in self.rows)
+        self.menu.open(menu_items(self.paused, self.keys_ok, level, muted), anchor)
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         try:
