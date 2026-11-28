@@ -7,7 +7,8 @@ The knob changes the volume of the app that is playing:
 | App | How it is changed |
 |---|---|
 | Spotify | [Spotify's own slider](#spotifys-own-slider), after a one-time setup (Spotify Premium). Without it: Windows' own per-app volume |
-| Other apps you list | Windows' own per-app volume (set `apps` in the [settings](#settings) file) |
+| Plex (the desktop app) | Windows' own per-app volume: Plex's level in the Windows Volume Mixer, not Plex's own slider |
+| Other apps you list | Windows' own per-app volume (set `apps` in the [settings](#settings) file). Plexamp and Plex HTPC are not on by default, but show with their names when you add `plexamp.exe` or `Plex HTPC.exe` |
 | YouTube and YouTube Music in Brave | A small Brave extension that moves the player's volume slider |
 
 If nothing is playing, the knob changes all of them. The mute key mutes and unmutes them together. Press it again to unmute what it muted: that app stays the target while it is muted, until something else plays. The same goes for an app you turned down to 0 %.
@@ -16,7 +17,7 @@ While the program runs, it takes over the volume keys: Windows' own master volum
 
 ## Volume pop-up
 
-When you turn the knob, a small pop-up shows at the bottom of the screen, like the one Windows has. It shows the app's name (Spotify, YouTube or YouTube Music; one block each when the knob changes more than one), the volume in %, and a bar. Above 100 % the bar turns orange, with a mark at 100 %. A muted app shows "Muted". When Spotify is full and you turn up, the pop-up shows "Max".
+When you turn the knob, a small pop-up shows at the bottom of the screen, like the one Windows has. It shows the app's name (Spotify, Plex, YouTube or YouTube Music; one block each when the knob changes more than one), the volume in %, and a bar. Above 100 % the bar turns orange, with a mark at 100 %. A muted app shows "Muted". When Spotify is full and you turn up, the pop-up shows "Max".
 
 - It goes away 1.5 seconds after the last turn.
 - It appears on your main screen. To show it on the screen where the mouse is, set `osd_monitor` to `"mouse"`.
@@ -222,7 +223,7 @@ All settings:
 | Setting | Default | What it does |
 |---|---|---|
 | `step` | 0.013 | Size of one click: 0.013 is 1.3 %. Range 0.01 to 0.20. |
-| `apps` | `["spotify.exe"]` | Windows apps the knob controls, by exe name. |
+| `apps` | `["plex.exe", "spotify.exe"]` | Windows apps the knob controls, by exe name. An older settings file that still has the old default (`["spotify.exe"]`) gets `plex.exe` added once. A list you changed is left alone. |
 | `boost_max` | 1.5 | Highest YouTube volume (150 %). 1.0 turns the boost off. |
 | `failsafe` | true | The safety reset above. |
 | `failsafe_level` | 0.5 | Volume a loud tab is reset to. |

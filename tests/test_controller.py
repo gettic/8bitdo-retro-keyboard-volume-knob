@@ -3,7 +3,7 @@ import logging
 import threading
 import unittest
 
-from knob import coreaudio, hotkeys
+from knob import coreaudio, display, hotkeys
 from knob.controller import Controller
 
 from tests.fakes import (FakeAudio, FakeClock, FakeSession, ProcessList, connect_host,
@@ -331,6 +331,52 @@ class ControllerTests(unittest.TestCase):
 def boosted(tid, volume=1.3, site="youtube", boost="on", max_volume=1.5):
     return {"tab": tid, "site": site, "playing": True, "volume": volume, "muted": False,
             "max_volume": max_volume, "boost": boost}
+
+
+class PlexTests(unittest.TestCase):
+    """Plex (in the default apps) follows the same rule as Spotify."""
+
+    def setUp(self):
+        self.clock = FakeClock()
+        self.bridge, self.rec = make_bridge(self.clock)
+        self.spotify = FakeSession("spotify.exe", volume=0.5)
+        self.plex = FakeSession("plex.exe", volume=0.6, pid=300)
+        self.audio = FakeAudio([self.spotify, self.plex])
+        self.ctl = Controller(settings(), lambda: self.audio, self.bridge, clock=self.clock,
+                              process_lister=ProcessList())
+        self.ctl.audio = self.audio
+
+    def test_plex_in_default_apps(self):
+        self.assertIn("plex.exe", settings()["apps"])
+        self.assertNotIn("plexamp.exe", settings()["apps"])
+        self.assertEqual([display.name_for(e) for e in ("plex.exe", "plexamp.exe", "plex htpc.exe")],
+                         ["Plex", "Plexamp", "Plex HTPC"])
+
+    def test_only_plex_playing_only_plex_changes(self):
+        connect_host(self.bridge, 1, [yt(7)])
+        self.plex._peak = 0.3
+        self.ctl.poll()
+        self.ctl.handle("up")
+        self.assertAlmostEqual(self.plex._volume, 0.6 + STEP)
+        self.assertEqual(self.spotify._volume, 0.5)
+        self.assertEqual([m["type"] for _, m in self.rec.sent], ["hello"])
+
+    def test_nothing_playing_plex_and_spotify_change(self):
+        connect_host(self.bridge, 1, [yt(7)])
+        self.ctl.poll()
+        self.ctl.handle("down")
+        self.assertAlmostEqual(self.plex._volume, 0.6 - STEP)
+        self.assertAlmostEqual(self.spotify._volume, 0.5 - STEP)
+        self.assertEqual(self.rec.sent[-1][1]["tabs"], [7])
+
+    def test_plex_not_in_apps_untouched(self):
+        self.ctl.settings["apps"] = ["spotify.exe"]
+        self.plex._peak = 0.3
+        self.ctl.refresh(force=True)
+        self.ctl.poll()
+        self.ctl.handle("up")
+        self.assertEqual(self.plex._volume, 0.6)
+        self.assertAlmostEqual(self.spotify._volume, 0.5 + STEP)
 
 
 class BoostAndFailsafeTests(unittest.TestCase):

@@ -62,7 +62,67 @@ class ConfigTests(unittest.TestCase):
 
     def test_bad_apps(self):
         s, w = config.validate({"apps": "spotify.exe"})
+        self.assertEqual(s["apps"], ["plex.exe", "spotify.exe"])
+        self.assertTrue(w)
+
+    def file(self):
+        with open(os.path.join(self.dir, config.SETTINGS_NAME), encoding="utf-8") as f:
+            return json.load(f)
+
+    def test_plex_in_defaults(self):
+        self.assertEqual(config.DEFAULTS["apps"], ["plex.exe", "spotify.exe"])
+        self.assertEqual(config.DEFAULTS["settings_version"], 2)
+
+    def test_old_default_apps_get_plex_once(self):
+        self.write(json.dumps({"apps": ["Spotify.exe"], "step": 0.02, "my_note": "hi"}))
+        s, w = config.load(self.dir)
+        self.assertEqual(w, [])
+        self.assertEqual(s["apps"], ["plex.exe", "spotify.exe"])
+        self.assertEqual(s["step"], 0.02)
+        self.assertEqual(self.file(), {"apps": ["plex.exe", "spotify.exe"], "step": 0.02,
+                                       "my_note": "hi", "settings_version": 2})
+        # the user takes Plex out again: not added back
+        self.write(json.dumps({"apps": ["spotify.exe"], "settings_version": 2}))
+        s, w = config.load(self.dir)
         self.assertEqual(s["apps"], ["spotify.exe"])
+        self.assertEqual(self.file(), {"apps": ["spotify.exe"], "settings_version": 2})
+
+    def test_own_apps_list_kept_on_upgrade(self):
+        self.write(json.dumps({"apps": ["spotify.exe", "vlc.exe"]}))
+        s, w = config.load(self.dir)
+        self.assertEqual(s["apps"], ["spotify.exe", "vlc.exe"])
+        self.assertEqual(self.file(), {"apps": ["spotify.exe", "vlc.exe"], "settings_version": 2})
+
+    def test_file_without_apps_gets_version_only(self):
+        self.write('{"step": 0.05}')
+        s, w = config.load(self.dir)
+        self.assertEqual(s["apps"], ["plex.exe", "spotify.exe"])
+        self.assertEqual(self.file(), {"step": 0.05, "settings_version": 2})
+
+    def test_current_file_not_rewritten(self):
+        text = '{"apps": ["spotify.exe"], "settings_version": 2}'
+        self.write(text)
+        config.load(self.dir)
+        with open(os.path.join(self.dir, config.SETTINGS_NAME), encoding="utf-8") as f:
+            self.assertEqual(f.read(), text)
+
+    def test_broken_file_not_upgraded(self):
+        self.write("{not json")
+        config.load(self.dir)
+        with open(os.path.join(self.dir, config.SETTINGS_NAME), encoding="utf-8") as f:
+            self.assertEqual(f.read(), "{not json")
+
+    def test_upgrade_write_fails_still_used(self):
+        self.write(json.dumps({"apps": ["spotify.exe"]}))
+        with mock.patch.object(config, "_write_atomic", side_effect=OSError(13, "Access denied")):
+            s, w = config.load(self.dir)
+        self.assertEqual(s["apps"], ["plex.exe", "spotify.exe"])
+        self.assertEqual(len(w), 1)
+
+    def test_settings_version_checked(self):
+        self.assertEqual(config.validate({"settings_version": 1})[0]["settings_version"], 1)
+        s, w = config.validate({"settings_version": "x"})
+        self.assertEqual(s["settings_version"], 2)
         self.assertTrue(w)
 
     def test_env_override(self):

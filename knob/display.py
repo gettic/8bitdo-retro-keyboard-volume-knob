@@ -10,7 +10,8 @@ import math
 Row = collections.namedtuple("Row", "name level muted max_level at_max", defaults=(False,))
 
 TITLE = "8BitDo Volume Knob"
-NAMES = {"spotify.exe": "Spotify", "brave.exe": "Brave",
+NAMES = {"spotify.exe": "Spotify", "brave.exe": "Brave", "plex.exe": "Plex",
+         "plexamp.exe": "Plexamp", "plex htpc.exe": "Plex HTPC",
          "youtube": "YouTube", "ytmusic": "YouTube Music"}
 TIP_MAX = 127  # NOTIFYICONDATAW.szTip holds 128 characters with the terminator
 

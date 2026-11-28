@@ -8,7 +8,7 @@ LOG_NAME = "volume_knob.log"
 
 DEFAULTS = {
     "step": 0.013,            # one knob click = 1.3 % (0-100 % in about 2 full turns, 38 clicks per turn)
-    "apps": ["spotify.exe"],  # Windows apps the knob controls (exe names)
+    "apps": ["plex.exe", "spotify.exe"],  # Windows apps the knob controls (exe names)
     "peak_threshold": 0.001,  # sound level above this counts as "playing" (~ -60 dBFS)
     "hold_seconds": 1.5,      # an app stays "playing" this long after its last sound
     "brave_fallback": True,   # no extension connected: change Brave's whole sound instead
@@ -23,7 +23,11 @@ DEFAULTS = {
     "tray_style": "knob_number",  # knob with the % on a strip along the bottom, or "knob"
     "spotify_control": "web",  # "web": Spotify's own bar (after --spotify-login), "mixer": Windows mixer
     "log_level": "INFO",
+    "settings_version": 2,    # file format; older files are brought up to date once (see _upgrade)
 }
+
+SETTINGS_VERSION = DEFAULTS["settings_version"]
+OLD_DEFAULT_APPS = ["spotify.exe"]  # the "apps" default before version 2 (Plex added)
 
 LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 OSD_MONITORS = ("primary", "mouse")
@@ -104,6 +108,12 @@ def validate(raw):
             out["log_level"] = level
         else:
             warnings.append("log_level: unknown, using INFO")
+    if "settings_version" in raw:
+        version = raw["settings_version"]
+        if isinstance(version, int) and not isinstance(version, bool) and version >= 1:
+            out["settings_version"] = version
+        else:
+            warnings.append(f"settings_version: must be a whole number, using {SETTINGS_VERSION}")
     return out, warnings
 
 
@@ -220,4 +230,31 @@ def load(folder=None):
             raw = json.load(f)
     except (OSError, ValueError):
         return dict(DEFAULTS), ["settings file could not be read; using defaults"]
-    return validate(raw)
+    warnings = []
+    if isinstance(raw, dict):
+        upgraded = _upgrade(raw)
+        if upgraded is not None:
+            raw = upgraded
+            try:
+                _write_atomic(path, raw)
+            except OSError as e:  # used for this run anyway; tried again next start
+                warnings.append(f"could not update the settings file: {e.strerror}")
+    settings, more = validate(raw)
+    return settings, warnings + more
+
+
+def _upgrade(raw):
+    """Bring a settings file from an older version up to date, once: the new
+    file contents, or None when it is already current. Version 2 adds Plex to
+    "apps" only when the list is still the old default (a list the user set
+    up stays as it is, and Plex taken out later is not added back)."""
+    version = raw.get("settings_version", 1)
+    if isinstance(version, int) and not isinstance(version, bool) and version >= SETTINGS_VERSION:
+        return None
+    data = dict(raw)
+    apps = raw.get("apps")
+    if (isinstance(apps, list) and all(isinstance(a, str) for a in apps)
+            and sorted({a.strip().lower() for a in apps}) == OLD_DEFAULT_APPS):
+        data["apps"] = list(DEFAULTS["apps"])
+    data["settings_version"] = SETTINGS_VERSION
+    return data
